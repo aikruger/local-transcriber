@@ -7,9 +7,13 @@ import * as fs from 'fs';
 
 export default class LocalTranscriberPlugin extends Plugin {
 	settings: LocalTranscriberSettings;
+	statusBarItem: HTMLElement;
 
 	async onload() {
 		await this.loadSettings();
+
+		this.statusBarItem = this.addStatusBarItem();
+		this.statusBarItem.setText('');
 
 		// Check environment on load if not ready
 		if (!this.settings.envReady) {
@@ -100,28 +104,38 @@ export default class LocalTranscriberPlugin extends Plugin {
 		const modal = new TranscribeModal(this.app, this);
 		modal.open();
 
-		try {
-			modal.setStage('Checking environment');
-			await this.setupWhisperEnvironment(modal);
+		modal.onTranscribeClick(async () => {
+			modal.startRunning();
+			this.statusBarItem.setText('🔊 Transcribing...');
+			try {
+				modal.setStage('Checking environment');
+				await this.setupWhisperEnvironment(modal);
 
-			modal.setStage('Preparing audio');
-			const filePath = this.getAbsolutePath(file);
+				modal.setStage('Preparing audio');
+				const filePath = this.getAbsolutePath(file);
 
-			modal.setStage('Transcribing');
-			const result: any = await this.processFile(filePath, modal, modal.selectedModel, modal.selectedSpeakers);
+				modal.setStage('Transcribing');
+				const result: any = await this.processFile(filePath, modal, modal.selectedModel, modal.selectedSpeakers);
 
-			modal.setStage('Saving outputs');
-			await this.saveOutputs(file.basename, result.segments);
+				modal.setStage('Saving outputs');
+				await this.saveOutputs(file.basename, result.segments, modal.selectedInterval, modal.selectedPauseGap);
 
-			modal.setStage('Done');
-			new Notice('Transcription completed!');
-		} catch (err: any) {
-			const msg = err?.message ?? 'Unknown error';
-			modal.log(`❌ Error: ${msg}`);
-			new Notice(`Transcription failed — see modal for details.`);
-		} finally {
-			// keep modal open to show result or error, user can close it.
-		}
+				modal.setStage('Done');
+				modal._isRunning = false;
+				modal.transcribeBtn.textContent = '✅ Done — Transcribe again?';
+				modal.transcribeBtn.disabled = false;
+				new Notice('Transcription completed!');
+			} catch (err: any) {
+				const msg = err?.message ?? 'Unknown error';
+				modal.log(`❌ Error: ${msg}`);
+				modal._isRunning = false;
+				modal.transcribeBtn.textContent = '❌ Failed — Retry?';
+				modal.transcribeBtn.disabled = false;
+				new Notice(`Transcription failed — see modal for details.`);
+			} finally {
+				this.statusBarItem.setText('');
+			}
+		});
 	}
 
 	async handleTranscribeExternal(filePath: string, fileName: string) {
@@ -133,27 +147,39 @@ export default class LocalTranscriberPlugin extends Plugin {
 		const modal = new TranscribeModal(this.app, this);
 		modal.open();
 
-		try {
-			modal.setStage('Checking environment');
-			await this.setupWhisperEnvironment(modal);
+		modal.onTranscribeClick(async () => {
+			modal.startRunning();
+			this.statusBarItem.setText('🔊 Transcribing...');
+			try {
+				modal.setStage('Checking environment');
+				await this.setupWhisperEnvironment(modal);
 
-			modal.setStage('Preparing audio');
-			const lastDotIndex = fileName.lastIndexOf('.');
-			const stem = lastDotIndex !== -1 ? fileName.substring(0, lastDotIndex) : fileName;
+				modal.setStage('Preparing audio');
+				const lastDotIndex = fileName.lastIndexOf('.');
+				const stem = lastDotIndex !== -1 ? fileName.substring(0, lastDotIndex) : fileName;
 
-			modal.setStage('Transcribing');
-			const result: any = await this.processFile(filePath, modal, modal.selectedModel, modal.selectedSpeakers);
+				modal.setStage('Transcribing');
+				const result: any = await this.processFile(filePath, modal, modal.selectedModel, modal.selectedSpeakers);
 
-			modal.setStage('Saving outputs');
-			await this.saveOutputs(stem, result.segments);
+				modal.setStage('Saving outputs');
+				await this.saveOutputs(stem, result.segments, modal.selectedInterval, modal.selectedPauseGap);
 
-			modal.setStage('Done');
-			new Notice('Transcription completed!');
-		} catch (err: any) {
-			const msg = err?.message ?? 'Unknown error';
-			modal.log(`❌ Error: ${msg}`);
-			new Notice(`Transcription failed — see modal for details.`);
-		}
+				modal.setStage('Done');
+				modal._isRunning = false;
+				modal.transcribeBtn.textContent = '✅ Done — Transcribe again?';
+				modal.transcribeBtn.disabled = false;
+				new Notice('Transcription completed!');
+			} catch (err: any) {
+				const msg = err?.message ?? 'Unknown error';
+				modal.log(`❌ Error: ${msg}`);
+				modal._isRunning = false;
+				modal.transcribeBtn.textContent = '❌ Failed — Retry?';
+				modal.transcribeBtn.disabled = false;
+				new Notice(`Transcription failed — see modal for details.`);
+			} finally {
+				this.statusBarItem.setText('');
+			}
+		});
 	}
 
 	async setupWhisperEnvironment(modal: TranscribeModal) {
@@ -436,7 +462,15 @@ export default class LocalTranscriberPlugin extends Plugin {
 		return `[${pad(m, 2)}:${pad(s, 2)}.${pad(ms, 2)}]`;
 	}
 
-	async saveOutputs(stem: string, segments: any[]) {
+	async saveOutputs(
+		stem: string,
+		segments: any[],
+		intervalOverride?: number,
+		pauseGapOverride?: number
+	) {
+		const interval = intervalOverride ?? this.settings.markdownInterval;
+		const pauseGap = pauseGapOverride ?? this.settings.markdownPauseGap;
+
 		const folderPath = this.settings.audioFolder.endsWith('/') ? this.settings.audioFolder : this.settings.audioFolder + '/';
 
 		// Create folder if not exists
@@ -502,7 +536,7 @@ export default class LocalTranscriberPlugin extends Plugin {
 			}
 
 			// Build inline transcript (see Feature 4 for paragraph grouping)
-			md += this.buildMarkdownTranscript(segments);
+			md += this.buildMarkdownTranscript(segments, interval, pauseGap);
 
 			const mdPath = `${folderPath}${stem}.md`;
 			const existingMd = this.app.vault.getAbstractFileByPath(mdPath);
@@ -514,11 +548,15 @@ export default class LocalTranscriberPlugin extends Plugin {
 		}
 	}
 
-	buildMarkdownTranscript(segments: any[]): string {
+	buildMarkdownTranscript(
+		segments: any[],
+		markdownInterval: number = this.settings.markdownInterval,
+		markdownPauseGap: number = this.settings.markdownPauseGap
+	): string {
 		if (!segments || segments.length === 0) return '_No speech detected._\n';
 
-		const intervalSec = this.settings.markdownInterval * 60;   // 0 = no grouping
-		const pauseGap = this.settings.markdownPauseGap;
+		const intervalSec = markdownInterval * 60;   // 0 = no grouping
+		const pauseGap = markdownPauseGap;
 
 		let output = '';
 		let paragraphLines: string[] = [];
@@ -588,11 +626,23 @@ class TranscribeModal extends Modal {
 	private plugin: LocalTranscriberPlugin;
 	selectedModel: string;
 	selectedSpeakers: string;
+	selectedInterval: number;
+	selectedPauseGap: number;
 
 	private logArea: HTMLDivElement;
 	private progressBar: HTMLProgressElement;
 	private progressLabel: HTMLSpanElement;
 	private previewArea: HTMLDivElement;
+	private runSection: HTMLDivElement;
+	transcribeBtn: HTMLButtonElement;
+
+	private _modelDropdown: any;
+	private _speakerDropdown: any;
+	private _intervalDropdown: any;
+	private _pauseInput: any;
+
+	public _isRunning = false;
+	private _onTranscribeClick?: () => void;
 
 	// Ordered stages with % completion values
 	private stages = [
@@ -611,6 +661,8 @@ class TranscribeModal extends Modal {
 		this.plugin = plugin;
 		this.selectedModel = plugin.settings.modelSize;
 		this.selectedSpeakers = plugin.settings.speakers;
+		this.selectedInterval = plugin.settings.markdownInterval;
+		this.selectedPauseGap = plugin.settings.markdownPauseGap;
 	}
 
 	onOpen() {
@@ -619,6 +671,9 @@ class TranscribeModal extends Modal {
 		contentEl.addClass('local-transcriber-modal');
 		contentEl.createEl('h2', { text: '🔊 Transcriber' });
 
+		// ── SECTION 1: Configuration (always visible) ──
+		const configSection = contentEl.createDiv({ cls: 'lt-config-section' });
+
 		// Model selector
 		const models = this.plugin.settings.availableModels
 			.split('\n')
@@ -626,49 +681,98 @@ class TranscribeModal extends Modal {
 			.filter(m => m.length > 0);
 
 		if (models.length > 0) {
-			const modelRow = new Setting(contentEl)
+			new Setting(configSection)
 				.setName('Model')
-				.setDesc('Select Whisper model for this transcription');
-			modelRow.addDropdown((dd: any) => {
-				models.forEach(m => dd.addOption(m, m));
-				dd.setValue(this.selectedModel);
-				dd.onChange((val: string) => { this.selectedModel = val; });
-			});
+				.setDesc('Select Whisper model for this transcription')
+				.addDropdown((dd: any) => {
+					models.forEach(m => dd.addOption(m, m));
+					dd.setValue(this.selectedModel);
+					dd.onChange((val: string) => { this.selectedModel = val; });
+					this._modelDropdown = dd;
+				});
 		}
 
 		// Speaker count selector
-		new Setting(contentEl)
+		new Setting(configSection)
 			.setName('Speakers')
 			.setDesc('Number of speakers to identify. 0 = disable diarization.')
 			.addDropdown((dd: any) => {
-				dd.addOption('0', 'None (no diarization)');
-				dd.addOption('auto', 'Auto-detect');
-				dd.addOption('2', '2 speakers');
-				dd.addOption('3', '3 speakers');
-				dd.addOption('4', '4 speakers');
-				dd.addOption('6', '6 speakers');
+				['0','auto','2','3','4','6'].forEach(v =>
+					dd.addOption(v, v === '0' ? 'None' : v === 'auto' ? 'Auto-detect' : `${v} speakers`)
+				);
 				dd.setValue(this.selectedSpeakers);
 				dd.onChange((val: string) => { this.selectedSpeakers = val; });
+				this._speakerDropdown = dd;
 			});
 
-		// Progress bar row
-		const progressRow = contentEl.createDiv({ cls: 'lt-progress-row' });
+		// Paragraph interval
+		new Setting(configSection)
+			.setName('Paragraph interval')
+			.setDesc('Group markdown into timed paragraphs.')
+			.addDropdown((dd: any) => {
+				[['0','None'],['1','1 min'],['2','2 min'],['5','5 min'],['10','10 min']]
+					.forEach(([v, l]) => dd.addOption(v, l));
+				dd.setValue(String(this.selectedInterval));
+				dd.onChange((val: string) => { this.selectedInterval = parseInt(val, 10); });
+				this._intervalDropdown = dd;
+			});
+
+		// Pause gap
+		new Setting(configSection)
+			.setName('Pause gap (s)')
+			.setDesc('Silence gap that triggers a paragraph break.')
+			.addText((text: any) => {
+				text.setPlaceholder('1.5').setValue(String(this.selectedPauseGap));
+				text.inputEl.style.width = '60px';
+				text.onChange((val: string) => { this.selectedPauseGap = parseFloat(val) || 1.5; });
+				this._pauseInput = text;
+			});
+
+		// ── Transcribe button ──
+		const btnRow = contentEl.createDiv({ cls: 'lt-btn-row' });
+		this.transcribeBtn = btnRow.createEl('button', {
+			text: '▶ Start Transcription',
+			cls: 'mod-cta lt-transcribe-btn',
+		});
+		this.transcribeBtn.addEventListener('click', () => {
+			if (this._onTranscribeClick) this._onTranscribeClick();
+		});
+
+		// ── SECTION 2: Progress and output (hidden until transcription starts) ──
+		this.runSection = contentEl.createDiv({ cls: 'lt-run-section lt-hidden' });
+
+		const progressRow = this.runSection.createDiv({ cls: 'lt-progress-row' });
 		this.progressLabel = progressRow.createEl('span', {
 			cls: 'lt-progress-label',
-			text: 'Starting...',
+			text: 'Waiting...',
 		});
 		this.progressBar = progressRow.createEl('progress');
 		this.progressBar.max = 100;
 		this.progressBar.value = 0;
 		this.progressBar.addClass('lt-progress-bar');
 
-		// Log area
-		contentEl.createEl('h4', { text: 'Log' });
-		this.logArea = contentEl.createDiv({ cls: 'lt-log-area' });
+		this.runSection.createEl('h4', { text: 'Log' });
+		this.logArea = this.runSection.createDiv({ cls: 'lt-log-area' });
 
-		// Live preview area
-		contentEl.createEl('h4', { text: 'Live Transcript Preview' });
-		this.previewArea = contentEl.createDiv({ cls: 'lt-preview-area' });
+		this.runSection.createEl('h4', { text: 'Live Transcript Preview' });
+		this.previewArea = this.runSection.createDiv({ cls: 'lt-preview-area' });
+	}
+
+	onTranscribeClick(callback: () => void) {
+		this._onTranscribeClick = callback;
+	}
+
+	startRunning() {
+		this._isRunning = true;
+		this.modalEl.addClass('lt-locked');
+
+		[this._modelDropdown, this._speakerDropdown, this._intervalDropdown]
+			.forEach(dd => { if (dd) dd.selectEl.disabled = true; });
+		if (this._pauseInput) this._pauseInput.inputEl.disabled = true;
+
+		this.transcribeBtn.textContent = '⏳ Transcribing...';
+		this.transcribeBtn.disabled = true;
+		this.runSection.removeClass('lt-hidden');
 	}
 
 	setStage(stageName: string) {
@@ -676,6 +780,14 @@ class TranscribeModal extends Modal {
 		if (!stage) return;
 		this.progressBar.value = stage.pct;
 		this.progressLabel.textContent = stage.name + '...';
+
+		// Animate bar during long-running stages
+		const longStages = ['Bootstrapping models', 'Transcribing', 'Diarizing speakers'];
+		if (longStages.includes(stageName)) {
+			this.progressBar.addClass('lt-progress-indeterminate');
+		} else {
+			this.progressBar.removeClass('lt-progress-indeterminate');
+		}
 	}
 
 	setProgress(pct: number) {
@@ -692,6 +804,14 @@ class TranscribeModal extends Modal {
 		if (!this.previewArea) return;
 		this.previewArea.createEl('div', { cls: 'lt-preview-line', text: line });
 		this.previewArea.scrollTop = this.previewArea.scrollHeight;
+	}
+
+	close() {
+		if (this._isRunning) {
+			new Notice('Transcription in progress. Please wait until it finishes.');
+			return;
+		}
+		super.close();
 	}
 
 	onClose() {
