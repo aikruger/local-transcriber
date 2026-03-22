@@ -1,7 +1,7 @@
 {
-	"name": "obsidian-sample-plugin",
+	"name": "local-transcriber",
 	"version": "1.0.0",
-	"description": "This is a sample plugin for Obsidian (https://obsidian.md)",
+	"description": "Transcribe audio/video files locally using Whisper and Pyannote.",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
