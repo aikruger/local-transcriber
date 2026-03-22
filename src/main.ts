@@ -51,25 +51,27 @@ export default class LocalTranscriberPlugin extends Plugin {
 		this.addCommand({
 			id: 'transcribe-external-file',
 			name: 'Transcribe external file',
-			callback: () => {
-				const input = document.createElement('input');
-				input.type = 'file';
-				input.accept = 'audio/*,video/*';
-				input.onchange = async (e: any) => {
-					const fileList = e.target.files;
-					if (fileList && fileList.length > 0) {
-						const webFile = fileList[0];
-						// Get absolute path from the File object (works in Obsidian's Electron environment)
-						const filePath = webFile.path;
-						if (filePath) {
-							// We can't pass a TFile here, so we'll mock one or refactor handleTranscribe
-							this.handleTranscribeExternal(filePath, webFile.name);
-						} else {
-							new Notice('Could not determine path of selected file.');
-						}
-					}
-				};
-				input.click();
+			callback: async () => {
+				// Require electron dynamically so the plugin can still load without it
+				// (even if the command won't work on mobile, standard Obsidian isDesktopOnly handles it)
+				const { remote } = require('electron');
+				const { dialog } = remote;
+				const result = await dialog.showOpenDialog({
+					title: 'Select audio or video file',
+					properties: ['openFile'],
+					filters: [
+						{
+							name: 'Audio/Video',
+							extensions: ['mp3', 'wav', 'm4a', 'ogg', 'mp4', 'mkv', 'avi', 'mov', 'webm'],
+						},
+					],
+				});
+
+				if (!result.canceled && result.filePaths.length > 0) {
+					const filePath = result.filePaths[0];
+					const fileName = path.basename(filePath);
+					await this.handleTranscribeExternal(filePath, fileName);
+				}
 			}
 		});
 
@@ -84,6 +86,16 @@ export default class LocalTranscriberPlugin extends Plugin {
 		return ['mp3', 'wav', 'm4a', 'ogg', 'mp4', 'mkv', 'avi', 'mov', 'webm'].includes(ext);
 	}
 
+	getAbsolutePath(file: TFile): string {
+		const adapter = this.app.vault.adapter as any;
+		if (adapter && typeof adapter.getBasePath === 'function') {
+			return path.join(adapter.getBasePath(), file.path);
+		}
+		throw new Error(
+			'Cannot resolve absolute path. Ensure you are running Obsidian on desktop.'
+		);
+	}
+
 	async handleTranscribe(file: TFile) {
 		const modal = new TranscribeProgressModal(this.app);
 		modal.open();
@@ -94,15 +106,7 @@ export default class LocalTranscriberPlugin extends Plugin {
 
 			modal.log('Preparing to process file...');
 
-			// Resolve absolute path. Depending on Obsidian setup, this might be tricky,
-			// but a common trick is to use adapter:
-			const adapter: any = this.app.vault.adapter;
-			let filePath = file.path;
-			if (adapter && adapter.getBasePath) {
-				filePath = path.join(adapter.getBasePath(), file.path);
-			} else {
-				throw new Error("Cannot determine absolute path of the file.");
-			}
+			const filePath = this.getAbsolutePath(file);
 
 			modal.log(`Running Whisper (${this.settings.modelSize})...`);
 			const result: any = await this.processFile(filePath, modal);
@@ -121,6 +125,11 @@ export default class LocalTranscriberPlugin extends Plugin {
 	}
 
 	async handleTranscribeExternal(filePath: string, fileName: string) {
+		if (!filePath || filePath.trim() === '') {
+			new Notice('No file path provided.');
+			return;
+		}
+
 		const modal = new TranscribeProgressModal(this.app);
 		modal.open();
 
