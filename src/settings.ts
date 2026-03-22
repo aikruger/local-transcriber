@@ -11,6 +11,7 @@ export interface LocalTranscriberSettings {
 	speakers: string;
 	outputFormat: string;
 	audioFolder: string;
+	createMarkdownNote: boolean;
 }
 
 export const DEFAULT_SETTINGS: LocalTranscriberSettings = {
@@ -22,7 +23,8 @@ export const DEFAULT_SETTINGS: LocalTranscriberSettings = {
 	language: "auto",
 	speakers: "0",
 	outputFormat: "SRT",
-	audioFolder: "Audio/"
+	audioFolder: "Audio/",
+	createMarkdownNote: true
 }
 
 export class LocalTranscriberSettingTab extends PluginSettingTab {
@@ -93,6 +95,16 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.audioFolder)
 				.onChange(async (value) => {
 					this.plugin.settings.audioFolder = value || 'Audio/';
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Create Markdown Note')
+			.setDesc('Automatically create a markdown note containing the transcript and embed the file.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.createMarkdownNote)
+				.onChange(async (value) => {
+					this.plugin.settings.createMarkdownNote = value;
 					await this.plugin.saveSettings();
 				}));
 

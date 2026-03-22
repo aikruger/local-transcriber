@@ -48,6 +48,31 @@ export default class LocalTranscriberPlugin extends Plugin {
 			}
 		});
 
+		this.addCommand({
+			id: 'transcribe-external-file',
+			name: 'Transcribe external file',
+			callback: () => {
+				const input = document.createElement('input');
+				input.type = 'file';
+				input.accept = 'audio/*,video/*';
+				input.onchange = async (e: any) => {
+					const fileList = e.target.files;
+					if (fileList && fileList.length > 0) {
+						const webFile = fileList[0];
+						// Get absolute path from the File object (works in Obsidian's Electron environment)
+						const filePath = webFile.path;
+						if (filePath) {
+							// We can't pass a TFile here, so we'll mock one or refactor handleTranscribe
+							this.handleTranscribeExternal(filePath, webFile.name);
+						} else {
+							new Notice('Could not determine path of selected file.');
+						}
+					}
+				};
+				input.click();
+			}
+		});
+
 		this.addSettingTab(new LocalTranscriberSettingTab(this.app, this));
 	}
 
@@ -71,27 +96,54 @@ export default class LocalTranscriberPlugin extends Plugin {
 
 			// Resolve absolute path. Depending on Obsidian setup, this might be tricky,
 			// but a common trick is to use adapter:
-			const adapter = this.app.vault.adapter as unknown;
+			const adapter: any = this.app.vault.adapter;
 			let filePath = file.path;
-			if (adapter.getBasePath) {
+			if (adapter && adapter.getBasePath) {
 				filePath = path.join(adapter.getBasePath(), file.path);
 			} else {
 				throw new Error("Cannot determine absolute path of the file.");
 			}
 
 			modal.log(`Running Whisper (${this.settings.modelSize})...`);
-			const result = await this.processFile(filePath, modal);
+			const result: any = await this.processFile(filePath, modal);
 
 			modal.log('Generating subtitles...');
-			await this.saveOutputs(file, result.segments);
+			await this.saveOutputs(file.basename, result.segments);
 
 			modal.log('Done!');
 			new Notice('Transcription completed!');
-		} catch (e: unknown) {
-			modal.log(`Error: ${e.message}`);
-			new Notice(`Transcription failed: ${e.message}`);
+		} catch (e: any) {
+			modal.log(`Error: ${e?.message}`);
+			new Notice(`Transcription failed: ${e?.message}`);
 		} finally {
 			// keep modal open to show result or error, user can close it.
+		}
+	}
+
+	async handleTranscribeExternal(filePath: string, fileName: string) {
+		const modal = new TranscribeProgressModal(this.app);
+		modal.open();
+
+		try {
+			modal.log('Checking environment...');
+			await this.setupWhisperEnvironment(modal);
+
+			modal.log('Preparing to process file...');
+			modal.log(`Running Whisper (${this.settings.modelSize})...`);
+			const result: any = await this.processFile(filePath, modal);
+
+			modal.log('Generating subtitles...');
+			// Remove extension for stem
+			const lastDotIndex = fileName.lastIndexOf('.');
+			const stem = lastDotIndex !== -1 ? fileName.substring(0, lastDotIndex) : fileName;
+
+			await this.saveOutputs(stem, result.segments);
+
+			modal.log('Done!');
+			new Notice('Transcription completed!');
+		} catch (e: any) {
+			modal.log(`Error: ${e?.message}`);
+			new Notice(`Transcription failed: ${e?.message}`);
 		}
 	}
 
@@ -177,8 +229,8 @@ export default class LocalTranscriberPlugin extends Plugin {
 
 	async bootstrapPython(modal: TranscribeProgressModal): Promise<void> {
 		return new Promise((resolve, reject) => {
-			const adapter = this.app.vault.adapter as unknown;
-			const vaultPath = adapter.getBasePath ? adapter.getBasePath() : '';
+			const adapter: any = this.app.vault.adapter;
+			const vaultPath = adapter && adapter.getBasePath ? adapter.getBasePath() : '';
 			const pluginDir = path.join(vaultPath, this.app.vault.configDir, 'plugins', 'local-transcriber');
 			const bootstrapScript = path.join(pluginDir, 'local_transcriber', 'bootstrap.py');
 			const modelsDir = path.join(pluginDir, 'models');
@@ -212,8 +264,8 @@ export default class LocalTranscriberPlugin extends Plugin {
 
 	async processFile(inputPath: string, modal: TranscribeProgressModal): Promise<unknown> {
 		return new Promise((resolve, reject) => {
-			const adapter = this.app.vault.adapter as unknown;
-			const vaultPath = adapter.getBasePath ? adapter.getBasePath() : '';
+			const adapter: any = this.app.vault.adapter;
+			const vaultPath = adapter && adapter.getBasePath ? adapter.getBasePath() : '';
 			const pluginDir = path.join(vaultPath, this.app.vault.configDir, 'plugins', 'local-transcriber');
 			const transcribeScript = path.join(pluginDir, 'local_transcriber', 'transcribe.py');
 			const modelsDir = path.join(pluginDir, 'models');
@@ -288,8 +340,7 @@ export default class LocalTranscriberPlugin extends Plugin {
 		return `[${pad(m, 2)}:${pad(s, 2)}.${pad(ms, 2)}]`;
 	}
 
-	async saveOutputs(file: TFile, segments: unknown[]) {
-		const stem = file.basename;
+	async saveOutputs(stem: string, segments: any[]) {
 		const folderPath = this.settings.audioFolder.endsWith('/') ? this.settings.audioFolder : this.settings.audioFolder + '/';
 
 		// Create folder if not exists
@@ -337,6 +388,36 @@ export default class LocalTranscriberPlugin extends Plugin {
 				await this.app.vault.modify(existing, txtContent.trim());
 			} else {
 				await this.app.vault.create(txtPath, txtContent.trim());
+			}
+		}
+
+		if (this.settings.createMarkdownNote) {
+			let mdContent = `# Transcription: ${stem}\n\n`;
+
+			if (['SRT', 'Both'].includes(this.settings.outputFormat)) {
+				mdContent += `![[${folderPath}${stem}.srt]]\n`;
+			} else {
+				mdContent += `![[${folderPath}${stem}.txt]]\n`;
+			}
+
+			mdContent += `\n---\n\n`;
+
+			segments.forEach(seg => {
+				const timeStr = this.formatTimeTxt(seg.start);
+				if (seg.speaker) {
+					const speakerNum = seg.speaker.replace('SPEAKER_', '');
+					mdContent += `**${timeStr} Speaker ${parseInt(speakerNum) + 1}:** ${seg.text}\n\n`;
+				} else {
+					mdContent += `**${timeStr}:** ${seg.text}\n\n`;
+				}
+			});
+
+			const mdPath = `${folderPath}${stem}.md`;
+			const existingMd = this.app.vault.getAbstractFileByPath(mdPath);
+			if (existingMd instanceof TFile) {
+				await this.app.vault.modify(existingMd, mdContent.trim());
+			} else {
+				await this.app.vault.create(mdPath, mdContent.trim());
 			}
 		}
 	}
