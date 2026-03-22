@@ -244,6 +244,14 @@ export default class LocalTranscriberPlugin extends Plugin {
 			const bootstrapScript = path.join(pluginDir, 'local_transcriber', 'bootstrap.py');
 			const modelsDir = path.join(pluginDir, 'models');
 
+			if (!fs.existsSync(bootstrapScript)) {
+				reject(new Error(
+					`bootstrap.py not found at: ${bootstrapScript}\n` +
+					`Ensure the local_transcriber/ folder is inside the plugin directory.`
+				));
+				return;
+			}
+
 			if (!fs.existsSync(modelsDir)) {
 				fs.mkdirSync(modelsDir, { recursive: true });
 			}
@@ -251,22 +259,37 @@ export default class LocalTranscriberPlugin extends Plugin {
 			const pyPath = this.getPythonExecutable();
 			const child = spawn(pyPath, [bootstrapScript, '--models-dir', modelsDir]);
 
+			let stderrOutput = '';
+			child.stderr.on('data', (data) => {
+				stderrOutput += data.toString();
+				const lines = data.toString().split('\n').filter((l: string) => l.trim());
+				for (const line of lines) {
+					modal.log(`[stderr] ${line}`);
+				}
+			});
+
 			child.stdout.on('data', (data) => {
 				const lines = data.toString().split('\n').filter((l: string) => l.trim());
 				for (const line of lines) {
 					try {
 						const msg = JSON.parse(line);
-						if (msg.status === 'installing') modal.log(`Installing package: ${msg.package}...`);
+						if (msg.status === 'installing') modal.log(`Installing: ${msg.package}...`);
 						else if (msg.status === 'downloading_model') modal.log(`Downloading model: ${msg.model}...`);
+						else if (msg.status === 'done') modal.log('Bootstrap complete.');
 					} catch (e) {
-						// ignore
+						modal.log(line);
 					}
 				}
 			});
 
 			child.on('close', (code) => {
 				if (code === 0) resolve();
-				else reject(new Error(`Bootstrap failed with code ${code}`));
+				else {
+					reject(new Error(
+						`Bootstrap failed with code ${code}.\n` +
+						(stderrOutput ? `Python error:\n${stderrOutput}` : 'No stderr output captured.')
+					));
+				}
 			});
 		});
 	}
