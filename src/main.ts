@@ -115,9 +115,10 @@ export default class LocalTranscriberPlugin extends Plugin {
 
 			modal.setStage('Done');
 			new Notice('Transcription completed!');
-		} catch (e: any) {
-			modal.log(`Error: ${e?.message}`);
-			new Notice(`Transcription failed: ${e?.message}`);
+		} catch (err: any) {
+			const msg = err?.message ?? 'Unknown error';
+			modal.log(`❌ Error: ${msg}`);
+			new Notice(`Transcription failed — see modal for details.`);
 		} finally {
 			// keep modal open to show result or error, user can close it.
 		}
@@ -148,9 +149,10 @@ export default class LocalTranscriberPlugin extends Plugin {
 
 			modal.setStage('Done');
 			new Notice('Transcription completed!');
-		} catch (e: any) {
-			modal.log(`Error: ${e?.message}`);
-			new Notice(`Transcription failed: ${e?.message}`);
+		} catch (err: any) {
+			const msg = err?.message ?? 'Unknown error';
+			modal.log(`❌ Error: ${msg}`);
+			new Notice(`Transcription failed — see modal for details.`);
 		}
 	}
 
@@ -330,9 +332,12 @@ export default class LocalTranscriberPlugin extends Plugin {
 
 			let finalJson = '';
 			let totalDuration = 0;
+			let rawStdout = '';
 
 			child.stdout.on('data', (chunk) => {
-				const lines = chunk.toString().split('\n').filter((l: string) => l.trim());
+				const text = chunk.toString();
+				rawStdout += text;
+				const lines = text.split('\n').filter((l: string) => l.trim());
 				for (const line of lines) {
 					if (line.startsWith('{')) {
 						try {
@@ -367,16 +372,45 @@ export default class LocalTranscriberPlugin extends Plugin {
 
 			child.on('close', (code) => {
 				if (code !== 0) {
-					reject(new Error(`Process failed with code ${code}. ${stderrOutput}`));
+					reject(new Error(`Process failed with code ${code}.\n${stderrOutput || 'No stderr.'}`));
 					return;
 				}
-				try {
-					const parsed = JSON.parse(finalJson);
-					if (parsed.error) reject(new Error(parsed.error));
-					else resolve(parsed);
-				} catch {
-					reject(new Error('No valid JSON result from Python backend.'));
+
+				// Try typed result line first
+				if (finalJson) {
+					try {
+						const parsed = JSON.parse(finalJson);
+						if (parsed.error) {
+							reject(new Error(parsed.error));
+							return;
+						}
+						resolve(parsed);
+						return;
+					} catch {
+						/* fall through */
+					}
 				}
+
+				// Fallback: scan all stdout lines for any JSON with a "segments" array
+				const allLines = rawStdout.split('\n').filter(l => l.trim().startsWith('{'));
+				for (let i = allLines.length - 1; i >= 0; i--) {
+					try {
+						const candidate = JSON.parse(allLines[i]!);
+						if (Array.isArray(candidate.segments)) {
+							resolve(candidate);
+							return;
+						}
+					} catch {
+						/* keep scanning */
+					}
+				}
+
+				// Nothing usable — show what Python actually said
+				reject(new Error(
+					`No valid JSON result from Python backend.\n` +
+					`stdout was:\n${rawStdout.slice(0, 500)}\n` +
+					`stderr was:\n${stderrOutput.slice(0, 500)}`
+				));
 			});
 		});
 	}
