@@ -6,3 +6,45 @@ available in the app when your plugin is enabled.
 If your plugin does not need CSS, delete this file.
 
 */
+
+.local-transcriber-modal { padding: 0 8px; }
+
+.lt-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 16px 0;
+}
+.lt-progress-label {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  min-width: 180px;
+}
+.lt-progress-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  accent-color: var(--interactive-accent);
+}
+.lt-log-area {
+  max-height: 120px;
+  overflow-y: auto;
+  font-family: monospace;
+  font-size: 0.8em;
+  white-space: pre-wrap;
+  background: var(--background-secondary);
+  padding: 8px 10px;
+  border-radius: 5px;
+  margin-bottom: 8px;
+}
+.lt-preview-area {
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 0.85em;
+  line-height: 1.6;
+  background: var(--background-primary-alt);
+  padding: 8px 10px;
+  border-radius: 5px;
+}
+.lt-log-line { color: var(--text-muted); }
+.lt-preview-line { margin-bottom: 2px; }

@@ -1,4 +1,4 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, TFile } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, TFile, Setting } from 'obsidian';
 import { DEFAULT_SETTINGS, LocalTranscriberSettings, LocalTranscriberSettingTab } from "./settings";
 import { execFile, spawn } from 'child_process';
 import * as path from 'path';
@@ -97,24 +97,23 @@ export default class LocalTranscriberPlugin extends Plugin {
 	}
 
 	async handleTranscribe(file: TFile) {
-		const modal = new TranscribeProgressModal(this.app);
+		const modal = new TranscribeModal(this.app, this);
 		modal.open();
 
 		try {
-			modal.log('Checking environment...');
+			modal.setStage('Checking environment');
 			await this.setupWhisperEnvironment(modal);
 
-			modal.log('Preparing to process file...');
-
+			modal.setStage('Preparing audio');
 			const filePath = this.getAbsolutePath(file);
 
-			modal.log(`Running Whisper (${this.settings.modelSize})...`);
-			const result: any = await this.processFile(filePath, modal);
+			modal.setStage('Transcribing');
+			const result: any = await this.processFile(filePath, modal, modal.selectedModel, modal.selectedSpeakers);
 
-			modal.log('Generating subtitles...');
+			modal.setStage('Saving outputs');
 			await this.saveOutputs(file.basename, result.segments);
 
-			modal.log('Done!');
+			modal.setStage('Done');
 			new Notice('Transcription completed!');
 		} catch (e: any) {
 			modal.log(`Error: ${e?.message}`);
@@ -130,25 +129,24 @@ export default class LocalTranscriberPlugin extends Plugin {
 			return;
 		}
 
-		const modal = new TranscribeProgressModal(this.app);
+		const modal = new TranscribeModal(this.app, this);
 		modal.open();
 
 		try {
-			modal.log('Checking environment...');
+			modal.setStage('Checking environment');
 			await this.setupWhisperEnvironment(modal);
 
-			modal.log('Preparing to process file...');
-			modal.log(`Running Whisper (${this.settings.modelSize})...`);
-			const result: any = await this.processFile(filePath, modal);
-
-			modal.log('Generating subtitles...');
-			// Remove extension for stem
+			modal.setStage('Preparing audio');
 			const lastDotIndex = fileName.lastIndexOf('.');
 			const stem = lastDotIndex !== -1 ? fileName.substring(0, lastDotIndex) : fileName;
 
+			modal.setStage('Transcribing');
+			const result: any = await this.processFile(filePath, modal, modal.selectedModel, modal.selectedSpeakers);
+
+			modal.setStage('Saving outputs');
 			await this.saveOutputs(stem, result.segments);
 
-			modal.log('Done!');
+			modal.setStage('Done');
 			new Notice('Transcription completed!');
 		} catch (e: any) {
 			modal.log(`Error: ${e?.message}`);
@@ -156,7 +154,7 @@ export default class LocalTranscriberPlugin extends Plugin {
 		}
 	}
 
-	async setupWhisperEnvironment(modal: TranscribeProgressModal) {
+	async setupWhisperEnvironment(modal: TranscribeModal) {
 		let hasPy = await this.hasPython();
 		let hasFf = await this.hasFFmpeg();
 
@@ -183,11 +181,21 @@ export default class LocalTranscriberPlugin extends Plugin {
 		await this.saveSettings();
 
 		if (!this.settings.modelsReady) {
-			modal.log('Bootstrapping environment and downloading models (~500MB)...');
+			modal.setStage('Bootstrapping models');
+			modal.log('Downloading models (~500MB)...');
 			await this.bootstrapPython(modal);
 			this.settings.modelsReady = true;
 			await this.saveSettings();
 		}
+	}
+
+	getModelsDir(): string {
+		if (this.settings.modelsFolder && this.settings.modelsFolder.trim() !== '') {
+			return this.settings.modelsFolder.trim();
+		}
+		const adapter: any = this.app.vault.adapter;
+		const base = adapter?.getBasePath ? adapter.getBasePath() : '';
+		return path.join(base, this.app.vault.configDir, 'plugins', 'local-transcriber', 'models');
 	}
 
 	getPythonExecutable(): string {
@@ -236,13 +244,13 @@ export default class LocalTranscriberPlugin extends Plugin {
 		});
 	}
 
-	async bootstrapPython(modal: TranscribeProgressModal): Promise<void> {
+	async bootstrapPython(modal: TranscribeModal): Promise<void> {
 		return new Promise((resolve, reject) => {
 			const adapter: any = this.app.vault.adapter;
 			const vaultPath = adapter && adapter.getBasePath ? adapter.getBasePath() : '';
 			const pluginDir = path.join(vaultPath, this.app.vault.configDir, 'plugins', 'local-transcriber');
 			const bootstrapScript = path.join(pluginDir, 'local_transcriber', 'bootstrap.py');
-			const modelsDir = path.join(pluginDir, 'models');
+			const modelsDir = this.getModelsDir();
 
 			if (!fs.existsSync(bootstrapScript)) {
 				reject(new Error(
@@ -294,58 +302,80 @@ export default class LocalTranscriberPlugin extends Plugin {
 		});
 	}
 
-	async processFile(inputPath: string, modal: TranscribeProgressModal): Promise<unknown> {
+	async processFile(
+		inputPath: string,
+		modal: TranscribeModal,
+		modelOverride?: string,
+		speakersOverride?: string
+	): Promise<unknown> {
+		const modelToUse = modelOverride ?? this.settings.modelSize;
+		const speakersToUse = speakersOverride ?? this.settings.speakers;
+
 		return new Promise((resolve, reject) => {
 			const adapter: any = this.app.vault.adapter;
 			const vaultPath = adapter && adapter.getBasePath ? adapter.getBasePath() : '';
 			const pluginDir = path.join(vaultPath, this.app.vault.configDir, 'plugins', 'local-transcriber');
 			const transcribeScript = path.join(pluginDir, 'local_transcriber', 'transcribe.py');
-			const modelsDir = path.join(pluginDir, 'models');
+			const modelsDir = this.getModelsDir();
 
 			const pyPath = this.getPythonExecutable();
 			const child = spawn(pyPath, [
 				transcribeScript,
 				'--input', inputPath,
-				'--model', this.settings.modelSize,
+				'--model', modelToUse,
 				'--language', this.settings.language,
-				'--speakers', this.settings.speakers,
+				'--speakers', speakersToUse,
 				'--models-dir', modelsDir
 			]);
 
-			let output = '';
+			let finalJson = '';
+			let totalDuration = 0;
 
-			child.stdout.on('data', (data) => {
-				output += data.toString();
+			child.stdout.on('data', (chunk) => {
+				const lines = chunk.toString().split('\n').filter((l: string) => l.trim());
+				for (const line of lines) {
+					if (line.startsWith('{')) {
+						try {
+							const msg = JSON.parse(line);
+							if (msg.type === 'segment') {
+								const speaker = msg.speaker
+									? `Speaker ${parseInt(msg.speaker.replace('SPEAKER_', '')) + 1}: `
+									: '';
+								const timestamp = this.formatTimeTxt(msg.start);
+								modal.appendPreview(`${timestamp} ${speaker}${msg.text}`);
+								if (totalDuration > 0) {
+									// Progress between 40% and 83% during transcription
+									const pct = 40 + ((msg.end / totalDuration) * 43);
+									modal.setProgress(pct);
+								}
+							} else if (msg.type === 'meta') {
+								totalDuration = msg.duration || 0;
+							} else if (msg.type === 'result') {
+								finalJson = line;
+							}
+						} catch {
+							// not JSON, ignore
+						}
+					}
+				}
 			});
 
-			let errOutput = '';
+			let stderrOutput = '';
 			child.stderr.on('data', (data) => {
-				errOutput += data.toString();
+				stderrOutput += data.toString();
 			});
 
 			child.on('close', (code) => {
 				if (code !== 0) {
-					reject(new Error(`Process failed with code ${code}. ${errOutput}`));
+					reject(new Error(`Process failed with code ${code}. ${stderrOutput}`));
 					return;
 				}
-
 				try {
-					// Output might contain other prints, we find the last valid JSON object
-					const lines = output.split('\n').filter(l => l.trim().startsWith('{'));
-					if (lines.length > 0) {
-						const lastLine = lines[lines.length - 1];
-						if (lastLine) {
-							const result = JSON.parse(lastLine);
-							if (result.error) reject(new Error(result.error));
-							else resolve(result);
-						} else {
-							reject(new Error("No valid JSON output from python backend"));
-						}
-					} else {
-						reject(new Error("No valid JSON output from python backend"));
-					}
-				} catch (e) {
-					reject(new Error(`Failed to parse python output: ${e}`));
+					const parsed = JSON.parse(finalJson);
+					if (parsed.error) reject(new Error(parsed.error));
+					else resolve(parsed);
+				} catch {
+					reject(new Error('No valid JSON result from Python backend.'));
 				}
 			});
 		});
@@ -423,35 +453,92 @@ export default class LocalTranscriberPlugin extends Plugin {
 			}
 		}
 
-		if (this.settings.createMarkdownNote) {
-			let mdContent = `# Transcription: ${stem}\n\n`;
+		const createMD = this.settings.outputFormat === 'MD' || this.settings.createMarkdownNote;
+		const mdOnlyMode = this.settings.outputFormat === 'MD';
 
-			if (['SRT', 'Both'].includes(this.settings.outputFormat)) {
-				mdContent += `![[${folderPath}${stem}.srt]]\n`;
-			} else {
-				mdContent += `![[${folderPath}${stem}.txt]]\n`;
+		if (createMD) {
+			let md = `# Transcription: ${stem}\n\n`;
+
+			if (!mdOnlyMode) {
+				// Embed the SRT/TXT file as before
+				const embedFile = ['SRT', 'Both'].includes(this.settings.outputFormat)
+					? `${folderPath}${stem}.srt`
+					: `${folderPath}${stem}.txt`;
+				md += `![[${embedFile}]]\n\n---\n\n`;
 			}
 
-			mdContent += `\n---\n\n`;
-
-			segments.forEach(seg => {
-				const timeStr = this.formatTimeTxt(seg.start);
-				if (seg.speaker) {
-					const speakerNum = seg.speaker.replace('SPEAKER_', '');
-					mdContent += `**${timeStr} Speaker ${parseInt(speakerNum) + 1}:** ${seg.text}\n\n`;
-				} else {
-					mdContent += `**${timeStr}:** ${seg.text}\n\n`;
-				}
-			});
+			// Build inline transcript (see Feature 4 for paragraph grouping)
+			md += this.buildMarkdownTranscript(segments);
 
 			const mdPath = `${folderPath}${stem}.md`;
 			const existingMd = this.app.vault.getAbstractFileByPath(mdPath);
 			if (existingMd instanceof TFile) {
-				await this.app.vault.modify(existingMd, mdContent.trim());
+				await this.app.vault.modify(existingMd, md.trim());
 			} else {
-				await this.app.vault.create(mdPath, mdContent.trim());
+				await this.app.vault.create(mdPath, md.trim());
 			}
 		}
+	}
+
+	buildMarkdownTranscript(segments: any[]): string {
+		if (!segments || segments.length === 0) return '_No speech detected._\n';
+
+		const intervalSec = this.settings.markdownInterval * 60;   // 0 = no grouping
+		const pauseGap = this.settings.markdownPauseGap;
+
+		let output = '';
+		let paragraphLines: string[] = [];
+		let currentBlockStart = segments[0].start;
+
+		const flushParagraph = (blockTimestamp: number) => {
+			if (paragraphLines.length === 0) return;
+			const label = this.formatTimeTxt(blockTimestamp);
+			output += `**${label}**\n\n`;
+			output += paragraphLines.join(' ') + '\n\n';
+			paragraphLines = [];
+		};
+
+		for (let i = 0; i < segments.length; i++) {
+			const seg = segments[i];
+			const prev = i > 0 ? segments[i - 1] : null;
+
+			// Detect interval boundary
+			const intervalBoundary = intervalSec > 0 && (seg.start - currentBlockStart) >= intervalSec;
+
+			// Detect natural pause boundary
+			const naturalPause = prev !== null && (seg.start - prev.end) >= pauseGap;
+
+			if (intervalBoundary || (naturalPause && intervalSec > 0)) {
+				flushParagraph(currentBlockStart);
+				currentBlockStart = seg.start;
+			} else if (naturalPause && intervalSec === 0) {
+				// No interval grouping — just insert blank line at natural pauses
+				if (paragraphLines.length > 0) {
+					output += paragraphLines.join(' ') + '\n\n';
+					paragraphLines = [];
+				}
+				currentBlockStart = seg.start;
+			}
+
+			// Build the segment line
+			const speakerPrefix = seg.speaker
+				? `**Speaker ${parseInt(seg.speaker.replace('SPEAKER_', '')) + 1}:** `
+				: '';
+
+			if (intervalSec === 0) {
+				// No grouping: one line per segment with inline timestamp
+				const ts = this.formatTimeTxt(seg.start);
+				output += `${ts} ${speakerPrefix}${seg.text}\n\n`;
+			} else {
+				// Grouping mode: accumulate lines, emit timestamp as paragraph header
+				paragraphLines.push(`${speakerPrefix}${seg.text.trim()}`);
+			}
+		}
+
+		// Flush remaining
+		if (intervalSec > 0) flushParagraph(currentBlockStart);
+
+		return output;
 	}
 
 	async loadSettings() {
@@ -463,38 +550,117 @@ export default class LocalTranscriberPlugin extends Plugin {
 	}
 }
 
-class TranscribeProgressModal extends Modal {
-	logArea: HTMLDivElement;
+class TranscribeModal extends Modal {
+	private plugin: LocalTranscriberPlugin;
+	selectedModel: string;
+	selectedSpeakers: string;
 
-	constructor(app: App) {
+	private logArea: HTMLDivElement;
+	private progressBar: HTMLProgressElement;
+	private progressLabel: HTMLSpanElement;
+	private previewArea: HTMLDivElement;
+
+	// Ordered stages with % completion values
+	private stages = [
+		{ name: 'Checking environment', pct: 5 },
+		{ name: 'Installing dependencies', pct: 15 },
+		{ name: 'Bootstrapping models', pct: 25 },
+		{ name: 'Preparing audio', pct: 35 },
+		{ name: 'Transcribing', pct: 40 },
+		{ name: 'Diarizing speakers', pct: 85 },
+		{ name: 'Saving outputs', pct: 95 },
+		{ name: 'Done', pct: 100 },
+	];
+
+	constructor(app: App, plugin: LocalTranscriberPlugin) {
 		super(app);
+		this.plugin = plugin;
+		this.selectedModel = plugin.settings.modelSize;
+		this.selectedSpeakers = plugin.settings.speakers;
 	}
 
 	onOpen() {
-		let { contentEl } = this;
+		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.createEl('h2', { text: 'Transcribing...' });
+		contentEl.addClass('local-transcriber-modal');
+		contentEl.createEl('h2', { text: '🔊 Transcriber' });
 
-		this.logArea = contentEl.createDiv({ cls: 'transcribe-log-area' });
-		this.logArea.style.maxHeight = '300px';
-		this.logArea.style.overflowY = 'auto';
-		this.logArea.style.fontFamily = 'monospace';
-		this.logArea.style.whiteSpace = 'pre-wrap';
-		this.logArea.style.background = 'var(--background-secondary)';
-		this.logArea.style.padding = '10px';
-		this.logArea.style.borderRadius = '5px';
+		// Model selector
+		const models = this.plugin.settings.availableModels
+			.split('\n')
+			.map(m => m.trim())
+			.filter(m => m.length > 0);
+
+		if (models.length > 0) {
+			const modelRow = new Setting(contentEl)
+				.setName('Model')
+				.setDesc('Select Whisper model for this transcription');
+			modelRow.addDropdown((dd: any) => {
+				models.forEach(m => dd.addOption(m, m));
+				dd.setValue(this.selectedModel);
+				dd.onChange((val: string) => { this.selectedModel = val; });
+			});
+		}
+
+		// Speaker count selector
+		new Setting(contentEl)
+			.setName('Speakers')
+			.setDesc('Number of speakers to identify. 0 = disable diarization.')
+			.addDropdown((dd: any) => {
+				dd.addOption('0', 'None (no diarization)');
+				dd.addOption('auto', 'Auto-detect');
+				dd.addOption('2', '2 speakers');
+				dd.addOption('3', '3 speakers');
+				dd.addOption('4', '4 speakers');
+				dd.addOption('6', '6 speakers');
+				dd.setValue(this.selectedSpeakers);
+				dd.onChange((val: string) => { this.selectedSpeakers = val; });
+			});
+
+		// Progress bar row
+		const progressRow = contentEl.createDiv({ cls: 'lt-progress-row' });
+		this.progressLabel = progressRow.createEl('span', {
+			cls: 'lt-progress-label',
+			text: 'Starting...',
+		});
+		this.progressBar = progressRow.createEl('progress');
+		this.progressBar.max = 100;
+		this.progressBar.value = 0;
+		this.progressBar.addClass('lt-progress-bar');
+
+		// Log area
+		contentEl.createEl('h4', { text: 'Log' });
+		this.logArea = contentEl.createDiv({ cls: 'lt-log-area' });
+
+		// Live preview area
+		contentEl.createEl('h4', { text: 'Live Transcript Preview' });
+		this.previewArea = contentEl.createDiv({ cls: 'lt-preview-area' });
 	}
 
-	log(message: string) {
+	setStage(stageName: string) {
+		const stage = this.stages.find(s => s.name === stageName);
+		if (!stage) return;
+		this.progressBar.value = stage.pct;
+		this.progressLabel.textContent = stage.name + '...';
+	}
+
+	setProgress(pct: number) {
+		this.progressBar.value = Math.min(Math.max(pct, 0), 100);
+	}
+
+	log(text: string) {
 		if (!this.logArea) return;
-		const line = document.createElement('div');
-		line.textContent = message;
-		this.logArea.appendChild(line);
+		this.logArea.createEl('div', { cls: 'lt-log-line', text });
 		this.logArea.scrollTop = this.logArea.scrollHeight;
 	}
 
+	appendPreview(line: string) {
+		if (!this.previewArea) return;
+		this.previewArea.createEl('div', { cls: 'lt-preview-line', text: line });
+		this.previewArea.scrollTop = this.previewArea.scrollHeight;
+	}
+
 	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
+		this.contentEl.empty();
 	}
 }

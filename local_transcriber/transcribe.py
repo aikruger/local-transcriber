@@ -43,14 +43,21 @@ def main():
         print(json.dumps({"error": f"Whisper failed: {str(e)}"}))
         sys.exit(2)
 
+    # Emit meta first
+    print(json.dumps({"type": "meta", "duration": result["segments"][-1]["end"] if result["segments"] else 0}), flush=True)
+
     segments = []
     for seg in result.get("segments", []):
-        segments.append({
+        entry = {
             "start": seg["start"],
             "end": seg["end"],
             "text": seg["text"].strip(),
             "speaker": None
-        })
+        }
+        # Emit live preview line
+        print(json.dumps({"type": "segment", "start": seg["start"], "end": seg["end"],
+                          "text": seg["text"].strip(), "speaker": None}), flush=True)
+        segments.append(entry)
 
     # Optional diarization
     if args.speakers != "0":
@@ -80,6 +87,7 @@ def main():
         pass
 
     print(json.dumps({
+        "type": "result",
         "segments": segments,
         "meta": {
             "duration": result.get("segments", [{}])[-1].get("end", 0) if len(result.get("segments", [])) > 0 else 0,
