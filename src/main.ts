@@ -1,99 +1,188 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, TFile, Setting } from 'obsidian';
+import { DEFAULT_SETTINGS, LocalTranscriberSettings, LocalTranscriberSettingTab } from "./settings";
+import * as path from 'path';
+import { Environment } from './environment';
+import { OutputWriters } from './output-writers';
+import { TranscriptionFile } from './transcription-file';
+import { TranscriptionLive } from './transcription-live';
+import { LiveSessionManager } from './live-session';
 
-// Remember to rename these classes and interfaces!
+export default class LocalTranscriberPlugin extends Plugin {
+	settings: LocalTranscriberSettings;
+	statusBarItem: HTMLElement;
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+	environment: Environment;
+	outputWriters: OutputWriters;
+	transcriptionFile: TranscriptionFile;
+	transcriptionLive: TranscriptionLive;
+	liveSessionManager: LiveSessionManager;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
+		this.statusBarItem = this.addStatusBarItem();
+		this.statusBarItem.setText('');
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
+		this.environment = new Environment(this);
+		this.outputWriters = new OutputWriters(this);
+		this.transcriptionFile = new TranscriptionFile(this);
+		this.liveSessionManager = new LiveSessionManager(this);
+		this.transcriptionLive = new TranscriptionLive(this);
 
-		// This adds a simple command that can be triggered anywhere
+		// Check environment on load if not ready
+		if (!this.settings.envReady) {
+			this.environment.hasPython().then(hasPy => {
+				if (hasPy) {
+					this.settings.envReady = true;
+					this.saveSettings();
+				}
+			});
+		}
+
+		this.registerEvent(
+			this.app.workspace.on('file-menu', (menu, file) => {
+				if (file instanceof TFile && this.isMediaFile(file)) {
+					menu.addItem(item =>
+						item
+							.setTitle('🔊 Transcribe with Whisper')
+							.onClick(() => this.transcriptionFile.handleTranscribe(file))
+					);
+				}
+			})
+		);
+
 		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
+			id: 'transcribe-current-file',
+			name: 'Transcribe current file',
 			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
+				const activeFile = this.app.workspace.getActiveFile();
+				if (activeFile && this.isMediaFile(activeFile)) {
 					if (!checking) {
-						new SampleModal(this.app).open();
+						this.transcriptionFile.handleTranscribe(activeFile);
 					}
-
-					// This command will only show up in Command Palette when the check function returns true
 					return true;
 				}
 				return false;
 			}
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+		this.addCommand({
+			id: 'transcribe-external-file',
+			name: 'Transcribe external file',
+			callback: async () => {
+				const input = document.createElement('input');
+				input.type = 'file';
+				input.accept = 'audio/*,video/*';
+				input.style.display = 'none';
+				document.body.appendChild(input);
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
+				input.onchange = async (e: any) => {
+					const files = e.target.files;
+					if (files && files.length > 0) {
+						const file = files[0];
+						// Obsidian/Electron specific: File object has `.path`
+						const filePath = file.path;
+						const fileName = file.name;
+						if (filePath) {
+							await this.transcriptionFile.handleTranscribeExternal(filePath, fileName);
+						} else {
+							new Notice('Failed to get absolute path of file.');
+						}
+					}
+					document.body.removeChild(input);
+				};
+
+				input.click();
+			}
 		});
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		this.addCommand({
+			id: 'start-live-transcription',
+			name: 'Start live transcription',
+			callback: async () => {
+				await this.transcriptionLive.handleTranscribeLive();
+			}
+		});
 
+		this.addCommand({
+			id: 'check-live-transcription-environment',
+			name: 'Check live transcription environment',
+			callback: async () => {
+				await this.runDiagnostics();
+			}
+		});
+
+		this.addSettingTab(new LocalTranscriberSettingTab(this.app, this));
+	}
+
+	async runDiagnostics() {
+		new Notice('Running diagnostics...');
+		try {
+			const pyPath = this.environment.getPythonExecutable();
+
+			// Check python imports
+			const checkScript = `
+import sys
+try:
+	import whisper
+	import pyannote.audio
+	import soundfile
+	import numpy
+	print('OK')
+except Exception as e:
+	print(f'Error: {e}')
+	sys.exit(1)
+			`;
+
+			const { exec } = require('child_process');
+			const fs = require('fs');
+			const util = require('util');
+			const execPromise = util.promisify(exec);
+
+			const result = await execPromise(`"${pyPath}" -c "${checkScript.replace(/\n/g, '; ')}"`);
+			if (result.stdout.trim() === 'OK') {
+				new Notice('✅ Python imports OK (whisper, pyannote, soundfile, numpy)');
+			}
+
+			const hasMic = await navigator.mediaDevices.getUserMedia({ audio: true }).then(() => true).catch(() => false);
+			if (hasMic) {
+				new Notice('✅ Microphone access OK');
+			} else {
+				new Notice('❌ Microphone access denied or unavailable');
+			}
+
+			const folderPath = this.settings.liveOutputFolder;
+			const adapter = this.app.vault.adapter as any;
+			if (!await adapter.exists(folderPath.replace(/\/$/, ''))) {
+				await this.app.vault.createFolder(folderPath.replace(/\/$/, ''));
+			}
+			new Notice('✅ Write permissions to output folder OK');
+
+			const hasFf = await this.environment.hasFFmpeg();
+			if (hasFf) {
+				new Notice('✅ FFmpeg OK');
+			} else {
+				new Notice('❌ FFmpeg not found');
+			}
+
+		} catch (e: any) {
+			new Notice(`❌ Diagnostics failed: ${e.message}`);
+		}
 	}
 
 	onunload() {
 	}
 
+	isMediaFile(file: TFile): boolean {
+		const ext = file.extension.toLowerCase();
+		return ['mp3', 'wav', 'm4a', 'ogg', 'mp4', 'mkv', 'avi', 'mov', 'webm'].includes(ext);
+	}
+
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<LocalTranscriberSettings>);
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
-
-	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
 	}
 }
