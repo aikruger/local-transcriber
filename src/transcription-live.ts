@@ -32,21 +32,40 @@ export class TranscriptionLive {
 		this.app = plugin.app;
 	}
 
+	isRecording(): boolean {
+		return this.session !== null && this.session.status === 'recording';
+	}
+
+	isPaused(): boolean {
+		return this.session !== null && this.session.status === 'paused';
+	}
+
 	async handleTranscribeLive() {
-		this.modal = new LiveTranscribeModal(this.app, this.plugin);
-		this.modal.open();
+		if (!this.modal || !document.contains(this.modal.modalEl)) {
+			this.modal = new LiveTranscribeModal(this.app, this.plugin);
+			this.modal.open();
+		}
 
 		this.modal.onStartClick(async (micId: string) => {
 			try {
-				if (this.modal) {
-					await this.plugin.environment.setupWhisperEnvironment(this.modal);
+				if (this.isPaused()) {
+					await this.resumeLiveSession();
+				} else {
+					await this.plugin.environment.setupWhisperEnvironment({
+						log: (msg) => console.log(`[Dictation] ${msg}`),
+						setStage: (stage) => console.log(`[Dictation Stage] ${stage}`)
+					});
+					await this.startLiveSession(micId);
 				}
-				await this.startLiveSession(micId);
 			} catch (err: any) {
 				const msg = err?.message ?? 'Unknown error';
 				this.modal?.log(`❌ Error: ${msg}`);
 				new Notice(`Live Transcription failed — see modal for details.`);
 			}
+		});
+
+		this.modal.onPauseClick(() => {
+			this.pauseLiveSession();
 		});
 
 		this.modal.onStopClick(async () => {
@@ -110,24 +129,31 @@ export class TranscriptionLive {
 		const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
 		const sessionId = `live-${timestamp}`;
 
-		const outFolder = this.plugin.settings.liveOutputFolder || 'Live_Transcripts/';
-		const folderPath = outFolder.endsWith('/')
-			? outFolder
-			: outFolder + '/';
-
-		const sessionDirPath = `${folderPath}${sessionId}/`;
-
 		const adapter = this.app.vault.adapter as any;
 
-		// Create session directories
+		// Use a temp path outside the vault where possible, or a hidden plugin temp subfolder.
+		// Since we use vault adapters, let's use a hidden plugin folder.
+		const folderPath = this.app.vault.configDir + '/plugins/local-transcriber/tmp/';
+		const sessionDirPath = `${folderPath}${sessionId}/`;
+
 		if (!await adapter.exists(folderPath.replace(/\/$/, ''))) {
-			await this.app.vault.createFolder(folderPath.replace(/\/$/, ''));
+			await adapter.mkdir(folderPath.replace(/\/$/, ''));
 		}
 		if (!await adapter.exists(sessionDirPath.replace(/\/$/, ''))) {
-			await this.app.vault.createFolder(sessionDirPath.replace(/\/$/, ''));
+			await adapter.mkdir(sessionDirPath.replace(/\/$/, ''));
 		}
 		if (!await adapter.exists(`${sessionDirPath}chunks/`.replace(/\/$/, ''))) {
-			await this.app.vault.createFolder(`${sessionDirPath}chunks/`.replace(/\/$/, ''));
+			await adapter.mkdir(`${sessionDirPath}chunks/`.replace(/\/$/, ''));
+		}
+
+		let userRawPath = undefined;
+		if (this.plugin.settings.liveKeepRawAudio) {
+			const outFolder = this.plugin.settings.liveOutputFolder || 'Live_Transcripts/';
+			const userFolder = outFolder.endsWith('/') ? outFolder : outFolder + '/';
+			if (!await adapter.exists(userFolder.replace(/\/$/, ''))) {
+				await this.app.vault.createFolder(userFolder.replace(/\/$/, ''));
+			}
+			userRawPath = `${userFolder}${sessionId}.wav`;
 		}
 
 		this.session = {
@@ -141,17 +167,14 @@ export class TranscriptionLive {
 			chunkSeconds: this.plugin.settings.liveChunkSeconds || 10,
 			overlapSeconds: this.plugin.settings.liveChunkOverlapSeconds || 2,
 			sessionDir: sessionDirPath,
-			rawAudioPath: this.plugin.settings.liveKeepRawAudio ? `${sessionDirPath}session.wav` : undefined,
-			mdPath: this.plugin.settings.liveAutoCreateNote ? `${sessionDirPath}transcript.md` : undefined,
-			srtPath: `${sessionDirPath}transcript.srt`,
-			txtPath: `${sessionDirPath}transcript.txt`,
+			rawAudioPath: userRawPath,
 			chunksProcessed: 0,
 			transcriptSegments: [],
 			nextSubtitleIndex: 1
 		};
 		this.failedChunks = [];
 
-		this.modal?.setRecordingState(true);
+		this.modal?.setRecordingState('recording');
 		this.modal?.log('Starting live transcription session...');
 
 		await this.plugin.liveSessionManager.initSessionNote(this.session);
@@ -192,7 +215,7 @@ export class TranscriptionLive {
 			this.sourceNode.connect(this.processor);
 			this.processor.connect(this.audioContext.destination); // Required for script processor to work
 
-			this.plugin.statusBarItem.setText('🔴 Live Recording');
+			this.plugin.statusBarItem.setText('🎙 Dictating...');
 
 		} catch (err: any) {
 			this.modal?.log(`Failed to start recording: ${err.message}`);
@@ -244,12 +267,28 @@ export class TranscriptionLive {
 			this.session.chunksProcessed++;
 		} else {
 			this.chunkQueue.push(chunkFilePath);
-			this.modal?.updateQueueStatus(this.chunkQueue.length);
+			// this.modal?.updateQueueStatus(this.chunkQueue.length);
 
 			if (!this.isProcessingChunk) {
 				this.processNextChunk();
 			}
 		}
+	}
+
+	pauseLiveSession() {
+		if (!this.session || this.session.status !== 'recording') return;
+		this.session.status = 'paused';
+		this.modal?.setRecordingState('paused');
+		this.modal?.log('Dictation paused.');
+		this.plugin.statusBarItem.setText('⏸ Dictation Paused');
+	}
+
+	async resumeLiveSession() {
+		if (!this.session || this.session.status !== 'paused') return;
+		this.session.status = 'recording';
+		this.modal?.setRecordingState('recording');
+		this.modal?.log('Dictation resumed.');
+		this.plugin.statusBarItem.setText('🎙 Dictating...');
 	}
 
 	async stopLiveSession() {
@@ -283,35 +322,83 @@ export class TranscriptionLive {
 			}
 		}
 
-		// Save raw audio if needed
-		if (this.session.rawAudioPath) {
-			const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
-			const flatSamples = new Float32Array(totalSamplesSoFar);
-			let offset = 0;
-			for (const arr of this.recordedSamples) {
-				flatSamples.set(arr, offset);
-				offset += arr.length;
-			}
-			const wavBuffer = this.encodeWAV(flatSamples, this.sampleRate);
-			const adapter = this.app.vault.adapter as any;
-			const basePath = adapter.getBasePath();
-			const fullRawPath = path.join(basePath, this.session.rawAudioPath);
-			fs.writeFileSync(fullRawPath, Buffer.from(wavBuffer));
-			this.modal?.log(`Saved raw session audio to ${this.session.rawAudioPath}`);
+		this.modal?.setRecordingState('idle');
+		this.modal?.log('Live session stopping... waiting for transcription to finish.');
+		this.plugin.statusBarItem.setText('⏳ Finalizing dictation...');
+
+		// Wait for the chunk queue to drain and processing to complete
+		while (this.chunkQueue.length > 0 || this.isProcessingChunk) {
+			await new Promise(resolve => setTimeout(resolve, 500));
 		}
 
-		await this.plugin.liveSessionManager.finalizeSessionOutputs(this.session);
-		await this.writeSessionJson(this.session);
+		const rawAudioPath = this.session.rawAudioPath;
+		const sessionDir = this.session.sessionDir;
 
-		this.modal?.setRecordingState(false);
 		this.modal?.log('Live session stopped.');
 		this.plugin.statusBarItem.setText('');
+
+		// Prompt to keep or delete raw audio
+		if (rawAudioPath && this.recordedSamples.length > 0) {
+			const { Modal, Setting } = require('obsidian');
+			const promptModal = new Modal(this.app);
+			promptModal.titleEl.setText('Keep recording?');
+			promptModal.contentEl.setText('Do you want to save the raw audio recording of this dictation?');
+			new Setting(promptModal.contentEl)
+				.addButton((btn: any) => btn.setButtonText('Delete').onClick(async () => {
+					promptModal.close();
+					await this.cleanupSessionTempDir(sessionDir);
+				}))
+				.addButton((btn: any) => btn.setButtonText('Keep').setCta().onClick(async () => {
+					promptModal.close();
+					const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
+					const flatSamples = new Float32Array(totalSamplesSoFar);
+					let offset = 0;
+					for (const arr of this.recordedSamples) {
+						flatSamples.set(arr, offset);
+						offset += arr.length;
+					}
+					const wavBuffer = this.encodeWAV(flatSamples, this.sampleRate);
+					const adapter = this.app.vault.adapter as any;
+					const basePath = adapter.getBasePath();
+					const fullRawPath = path.join(basePath, rawAudioPath);
+					fs.writeFileSync(fullRawPath, Buffer.from(wavBuffer));
+					new Notice(`Saved dictation audio to ${rawAudioPath}`);
+					await this.cleanupSessionTempDir(sessionDir, [path.basename(rawAudioPath)]);
+				}));
+			promptModal.open();
+		} else {
+			await this.cleanupSessionTempDir(sessionDir);
+		}
 
 		// Reset state
 		this.session = null;
 		this.recordedSamples = [];
 		this.chunkQueue = [];
 		this.isProcessingChunk = false;
+	}
+
+	async cleanupSessionTempDir(sessionDir: string, keepFiles: string[] = []) {
+		const adapter = this.app.vault.adapter as any;
+		try {
+			if (await adapter.exists(sessionDir)) {
+				// Delete chunks and everything not in keepFiles
+				// This is a naive cleanup for a temp dir.
+				const list = await adapter.list(sessionDir);
+				for (const folder of list.folders) {
+					await adapter.rmdir(folder, true);
+				}
+				for (const file of list.files) {
+					if (!keepFiles.includes(path.basename(file))) {
+						await adapter.remove(file);
+					}
+				}
+				if (keepFiles.length === 0) {
+					await adapter.rmdir(sessionDir, true);
+				}
+			}
+		} catch (e) {
+			console.error("Cleanup failed", e);
+		}
 	}
 
 	async writeSessionJson(session: LiveTranscriptionSession) {
@@ -340,7 +427,7 @@ export class TranscriptionLive {
 
 		this.isProcessingChunk = true;
 		const chunkPath = this.chunkQueue.shift()!;
-		this.modal?.updateQueueStatus(this.chunkQueue.length);
+		// this.modal?.updateQueueStatus(this.chunkQueue.length);
 
 		const chunkIndex = this.session.chunksProcessed;
 		// Absolute time offset calculation
@@ -368,15 +455,12 @@ export class TranscriptionLive {
 					for (const seg of newSegments) {
 						this.session.transcriptSegments.push(seg);
 
-						// UI Preview
-						const timeStr = this.plugin.outputWriters.formatTimeTxt(seg.start);
-						const speaker = seg.speaker ? `Speaker ${parseInt(seg.speaker.replace('SPEAKER_', '')) + 1}: ` : '';
-						this.modal?.appendPreview(`${timeStr} ${speaker}${seg.text}`);
+						// We no longer preview in the modal or append to files directly here.
+						// Instead, we will insert it directly at the cursor position.
+						this.insertLiveChunkAtCursor(seg.text);
 
-						// Append to files
-						await this.plugin.liveSessionManager.appendTxtSegment(this.session, seg);
-						await this.plugin.liveSessionManager.appendSrtSegment(this.session, seg);
-						await this.plugin.liveSessionManager.appendMarkdownSegment(this.session, seg);
+						// Update the modal preview with the latest text
+						this.modal?.setPreviewText(seg.text);
 					}
 				}
 			}
@@ -392,6 +476,27 @@ export class TranscriptionLive {
 				this.isProcessingChunk = false;
 			}
 		}
+	}
+
+	insertLiveChunkAtCursor(text: string) {
+		const { MarkdownView } = require('obsidian');
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView) as any;
+		if (!view || !view.editor) return;
+
+		const editor = view.editor;
+		const cursor = editor.getCursor();
+
+		// Normalize spacing
+		let prefix = '';
+		if (cursor.ch > 0) {
+			const line = editor.getLine(cursor.line);
+			const prevChar = line.charAt(cursor.ch - 1);
+			if (!/\s/.test(prevChar) && !/[.,!?]/.test(prevChar)) {
+				prefix = ' ';
+			}
+		}
+
+		editor.replaceRange(prefix + text, cursor);
 	}
 
 	async processChunk(chunkPath: string, chunkStart: number): Promise<unknown> {
@@ -414,15 +519,9 @@ export class TranscriptionLive {
 				'--models-dir', modelsDir,
 				'--chunk-start', chunkStart.toString(),
 				'--session-id', this.session?.id || '',
-				'--output-format', 'jsonl'
+				'--output-format', 'jsonl',
+				'--no-diarization' // Diarization disabled for dictation
 			];
-
-			if (this.session?.speakers === 'live') {
-				// pass default speakers
-				args.push('--speakers', this.plugin.settings.speakers);
-			} else {
-				args.push('--no-diarization');
-			}
 
 			const child = spawn(pyPath, args);
 

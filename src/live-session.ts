@@ -21,10 +21,6 @@ export interface LiveTranscriptionSession {
 	overlapSeconds: number;
 	sessionDir: string;
 	rawAudioPath?: string;
-	notePath?: string;
-	srtPath?: string;
-	txtPath?: string;
-	mdPath?: string;
 	chunksProcessed: number;
 	transcriptSegments: LiveSegment[];
 	nextSubtitleIndex: number;
@@ -107,49 +103,9 @@ export class LiveSessionManager {
 		return filteredNewSegments;
 	}
 
-	async appendTxtSegment(session: LiveTranscriptionSession, segment: LiveSegment) {
-		const timeStr = this.plugin.outputWriters.formatTimeTxt(segment.start);
-		let line = '';
-		if (segment.speaker) {
-			const speakerNum = segment.speaker.replace('SPEAKER_', '');
-			line = `${timeStr} Speaker ${parseInt(speakerNum) + 1}: ${segment.text}\n`;
-		} else {
-			line = `${timeStr} ${segment.text}\n`;
-		}
-
-		if (session.txtPath) {
-			await this.appendToFile(session.txtPath, line);
-		}
-	}
-
-	async appendSrtSegment(session: LiveTranscriptionSession, segment: LiveSegment) {
-		let srtContent = `${session.nextSubtitleIndex}\n`;
-		srtContent += `${this.plugin.outputWriters.formatTime(segment.start)} --> ${this.plugin.outputWriters.formatTime(segment.end)}\n`;
-		if (segment.speaker) {
-			const speakerNum = segment.speaker.replace('SPEAKER_', '');
-			srtContent += `Speaker ${parseInt(speakerNum) + 1}: ${segment.text}\n\n`;
-		} else {
-			srtContent += `${segment.text}\n\n`;
-		}
-
-		session.nextSubtitleIndex++;
-
-		if (session.srtPath) {
-			await this.appendToFile(session.srtPath, srtContent);
-		}
-	}
-
-	async appendMarkdownSegment(session: LiveTranscriptionSession, segment: LiveSegment) {
-		if (session.mdPath) {
-			const timeStr = this.plugin.outputWriters.formatTimeTxt(segment.start);
-			const speakerPrefix = segment.speaker
-				? `**Speaker ${parseInt(segment.speaker.replace('SPEAKER_', '')) + 1}:** `
-				: '';
-
-			const mdContent = `${timeStr} ${speakerPrefix}${segment.text}\n\n`;
-			await this.appendToFile(session.mdPath, mdContent);
-		}
-	}
+	async appendTxtSegment(session: LiveTranscriptionSession, segment: LiveSegment) {}
+	async appendSrtSegment(session: LiveTranscriptionSession, segment: LiveSegment) {}
+	async appendMarkdownSegment(session: LiveTranscriptionSession, segment: LiveSegment) {}
 
 	async appendToFile(filePath: string, content: string) {
 		const file = this.app.vault.getAbstractFileByPath(filePath);
@@ -162,36 +118,10 @@ export class LiveSessionManager {
 	}
 
 	async initSessionNote(session: LiveTranscriptionSession) {
-		if (session.mdPath) {
-			const file = this.app.vault.getAbstractFileByPath(session.mdPath);
-			if (!file) {
-				const header = `# Live Transcript - ${session.startedAt}\n\nStatus: Recording\nModel: ${session.model}\nLanguage: ${session.language}\nSpeakers: ${session.speakers}\n\n## Transcript\n\n`;
-				await this.app.vault.create(session.mdPath, header);
-			}
-		}
-
-		if (session.srtPath) {
-			const file = this.app.vault.getAbstractFileByPath(session.srtPath);
-			if (!file) {
-				await this.app.vault.create(session.srtPath, '');
-			}
-		}
-		if (session.txtPath) {
-			const file = this.app.vault.getAbstractFileByPath(session.txtPath);
-			if (!file) {
-				await this.app.vault.create(session.txtPath, '');
-			}
-		}
+		// Dictation mode does not use session notes
 	}
 
 	async finalizeSessionOutputs(session: LiveTranscriptionSession) {
-		if (session.mdPath) {
-			const file = this.app.vault.getAbstractFileByPath(session.mdPath);
-			if (file instanceof TFile) {
-				let content = await this.app.vault.read(file);
-				content = content.replace('Status: Recording', 'Status: Finalized');
-				await this.app.vault.modify(file, content);
-			}
-		}
+		// Output writers removed for Dictation mode - outputs are inserted at cursor
 	}
 }

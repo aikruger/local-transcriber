@@ -65,42 +65,20 @@ def main():
 
     segments = []
 
-    # We will do diarization first if requested, so we can emit speakers immediately
-    speaker_intervals = []
-    if not args.no_diarization and args.speakers != "0":
-        try:
-            from pyannote.audio import Pipeline
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                use_auth_token=False
-            )
-            diarization = pipeline(temp_wav)
-            for turn, _, speaker in diarization.itertracks(yield_label=True):
-                speaker_intervals.append((turn.start, turn.end, speaker))
-        except Exception:
-            pass  # Fallback: no speakers
-
+    # Diarization is intentionally disabled for Live Dictation UX but we leave the arg handling.
     for seg in result.get("segments", []):
-        start_rel = seg["start"]
-        end_rel = seg["end"]
-        mid = (start_rel + end_rel) / 2
-
-        assigned_speaker = None
-        for (s, e, sp) in speaker_intervals:
-            if s <= mid <= e:
-                assigned_speaker = sp
-                break
-
-        # Emit segment with chunk-relative time (we will add chunk_start in TS or Python)
-        entry = {
-            "type": "segment",
-            "start": start_rel,
-            "end": end_rel,
-            "text": seg["text"].strip(),
-            "speaker": assigned_speaker
-        }
-        emit(entry)
-        segments.append(entry)
+        text = seg["text"].strip()
+        if text:
+            # Emit natural text for insertion
+            entry = {
+                "type": "segment",
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": text,
+                "speaker": None
+            }
+            emit(entry)
+            segments.append(entry)
 
     emit({
         "type": "result",

@@ -105,6 +105,24 @@ export default class LocalTranscriberPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: 'stop-live-transcription',
+			name: 'Stop live transcription',
+			callback: async () => {
+				if (this.transcriptionLive.isRecording()) {
+					await this.transcriptionLive.stopLiveSession();
+				} else {
+					new Notice('No live transcription session running.');
+				}
+			}
+		});
+
+		this.statusBarItem.onClickEvent(() => {
+			if (this.transcriptionLive.isRecording()) {
+				this.transcriptionLive.handleTranscribeLive();
+			}
+		});
+
+		this.addCommand({
 			id: 'check-live-transcription-environment',
 			name: 'Check live transcription environment',
 			callback: async () => {
