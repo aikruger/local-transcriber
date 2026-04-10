@@ -28,27 +28,33 @@ def main():
     parser.add_argument("--output-format", default="jsonl")
     parser.add_argument("--word-timestamps", action="store_true", default=True)
     parser.add_argument("--no-diarization", action="store_true")
+    parser.add_argument("--input-is-normalized-wav", action="store_true")
     args = parser.parse_args()
 
     language = None if args.language == "auto" else args.language
     models_dir = args.models_dir
 
-    # Convert to 16kHz mono WAV if needed
-    temp_wav = tempfile.mktemp(suffix=".wav")
-    try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", args.input, "-ac", "1", "-ar", "16000", "-vn", temp_wav],
-            check=True, capture_output=True
-        )
-    except subprocess.CalledProcessError as e:
-        emit({"type": "error", "error": f"ffmpeg failed: {e.stderr.decode()}"})
-        sys.exit(2)
+    if args.input_is_normalized_wav:
+        target_wav = args.input
+        temp_wav = None
+    else:
+        # Convert to 16kHz mono WAV if needed
+        temp_wav = tempfile.mktemp(suffix=".wav")
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", args.input, "-ac", "1", "-ar", "16000", "-vn", temp_wav],
+                check=True, capture_output=True
+            )
+        except subprocess.CalledProcessError as e:
+            emit({"type": "error", "error": f"ffmpeg failed: {e.stderr.decode()}"})
+            sys.exit(2)
+        target_wav = temp_wav
 
     try:
         import whisper
         # For live transcription, use the default models directory if available
         model = whisper.load_model(args.model, download_root=models_dir)
-        result = model.transcribe(temp_wav, language=language, word_timestamps=args.word_timestamps)
+        result = model.transcribe(target_wav, language=language, word_timestamps=args.word_timestamps)
     except Exception as e:
         emit({"type": "error", "error": f"Whisper failed: {str(e)}"})
         sys.exit(2)
@@ -88,10 +94,11 @@ def main():
     })
 
     # Cleanup
-    try:
-        os.remove(temp_wav)
-    except Exception:
-        pass
+    if temp_wav:
+        try:
+            os.remove(temp_wav)
+        except Exception:
+            pass
 
     sys.exit(0)
 

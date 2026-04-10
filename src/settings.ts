@@ -27,6 +27,7 @@ export interface LocalTranscriberSettings {
 	liveMicDeviceId: string;
 	liveSilenceGateDb: number;
 	liveModelSize: string;
+	liveLanguage: string;
 }
 
 export const DEFAULT_SETTINGS: LocalTranscriberSettings = {
@@ -37,7 +38,7 @@ export const DEFAULT_SETTINGS: LocalTranscriberSettings = {
 	modelSize: "base.en",
 	modelsFolder: "",
 	availableModels: "tiny.en\nbase.en\nsmall.en",
-	language: "auto",
+	language: "en",
 	speakers: "0",
 	outputFormat: "SRT",
 	audioFolder: "Audio/",
@@ -46,15 +47,16 @@ export const DEFAULT_SETTINGS: LocalTranscriberSettings = {
 	markdownPauseGap: 1.5,
 
 	// Live Transcription Settings defaults
-	liveChunkSeconds: 10,
-	liveChunkOverlapSeconds: 2,
+	liveChunkSeconds: 3,
+	liveChunkOverlapSeconds: 1,
 	liveAutoCreateNote: true,
 	liveOutputFolder: "Live_Transcripts/",
 	liveKeepRawAudio: true,
 	liveDiarizationMode: "finalize",
 	liveMicDeviceId: "default",
 	liveSilenceGateDb: -40,
-	liveModelSize: "base.en"
+	liveModelSize: "tiny.en",
+	liveLanguage: "en"
 }
 
 export class LocalTranscriberSettingTab extends PluginSettingTab {
@@ -125,12 +127,12 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Language')
-			.setDesc('Select language (e.g. "en" or "auto").')
+			.setDesc('Language code for transcription. Use "en" for English (UK). Use "auto" only if you need automatic detection.')
 			.addText(text => text
-				.setPlaceholder('auto')
+				.setPlaceholder('en')
 				.setValue(this.plugin.settings.language)
 				.onChange(async (value) => {
-					this.plugin.settings.language = value || 'auto';
+					this.plugin.settings.language = value || 'en';
 					await this.plugin.saveSettings();
 				}));
 
@@ -243,6 +245,39 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 				}));
 
 		containerEl.createEl('h3', { text: 'Live Transcription' });
+
+		new Setting(containerEl)
+			.setName('Live Chunk Seconds')
+			.setDesc('Length of audio chunks for live transcription. Smaller chunks = faster text appearance, slightly more fragmentation. Larger chunks = slower but potentially more stable phrasing.')
+			.addText(text => text
+				.setPlaceholder('3')
+				.setValue(String(this.plugin.settings.liveChunkSeconds))
+				.onChange(async (value) => {
+					this.plugin.settings.liveChunkSeconds = parseFloat(value) || 3;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Live Chunk Overlap Seconds')
+			.setDesc('Amount of overlap between chunks to preserve boundary words. Default: 1.')
+			.addText(text => text
+				.setPlaceholder('1')
+				.setValue(String(this.plugin.settings.liveChunkOverlapSeconds))
+				.onChange(async (value) => {
+					this.plugin.settings.liveChunkOverlapSeconds = parseFloat(value) || 1;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Live Dictation Language')
+			.setDesc('Default language for live dictation. Recommended: en (English UK).')
+			.addText(text => text
+				.setPlaceholder('en')
+				.setValue(this.plugin.settings.liveLanguage)
+				.onChange(async (value) => {
+					this.plugin.settings.liveLanguage = value || 'en';
+					await this.plugin.saveSettings();
+				}));
 
 		new Setting(containerEl)
 			.setName('Live Output Folder')

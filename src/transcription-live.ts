@@ -162,7 +162,7 @@ export class TranscriptionLive {
 			status: 'recording',
 			micDeviceId: micId,
 			model: this.plugin.settings.liveModelSize || 'base.en',
-			language: this.plugin.settings.language || 'auto',
+			language: this.plugin.settings.liveLanguage || 'en',
 			speakers: this.plugin.settings.liveDiarizationMode || 'finalize',
 			chunkSeconds: this.plugin.settings.liveChunkSeconds || 10,
 			overlapSeconds: this.plugin.settings.liveChunkOverlapSeconds || 2,
@@ -210,6 +210,11 @@ export class TranscriptionLive {
 					// Advance the offset by chunk - overlap
 					this.recordingOffset += (samplesPerChunk - overlapSamples);
 				}
+
+				// Update progress roughly every ~1 second worth of samples to avoid UI locking
+				if (totalSamplesSoFar % this.sampleRate < inputData.length) {
+					this.updateModalProgress();
+				}
 			};
 
 			this.sourceNode.connect(this.processor);
@@ -221,6 +226,28 @@ export class TranscriptionLive {
 			this.modal?.log(`Failed to start recording: ${err.message}`);
 			this.session = null;
 		}
+	}
+
+	updateModalProgress(isFinalizing: boolean = false) {
+		if (!this.session || !this.modal) return;
+
+		const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
+		const recordedSeconds = totalSamplesSoFar / this.sampleRate;
+
+		const effectiveChunkAdvance = this.session.chunkSeconds - this.session.overlapSeconds;
+		let transcribedSeconds = this.session.chunksProcessed * effectiveChunkAdvance;
+
+		// Ensure transcribed doesn't exceed recorded, which can happen slightly due to last chunk boundaries
+		if (transcribedSeconds > recordedSeconds) {
+			transcribedSeconds = recordedSeconds;
+		}
+
+		this.modal.setTranscriptionProgress(
+			recordedSeconds,
+			transcribedSeconds,
+			this.isProcessingChunk,
+			isFinalizing
+		);
 	}
 
 	async extractAndQueueChunk(startOffset: number, length: number) {
@@ -267,12 +294,13 @@ export class TranscriptionLive {
 			this.session.chunksProcessed++;
 		} else {
 			this.chunkQueue.push(chunkFilePath);
-			// this.modal?.updateQueueStatus(this.chunkQueue.length);
 
 			if (!this.isProcessingChunk) {
 				this.processNextChunk();
 			}
 		}
+
+		this.updateModalProgress();
 	}
 
 	pauseLiveSession() {
@@ -328,8 +356,11 @@ export class TranscriptionLive {
 
 		// Wait for the chunk queue to drain and processing to complete
 		while (this.chunkQueue.length > 0 || this.isProcessingChunk) {
+			this.updateModalProgress(true);
 			await new Promise(resolve => setTimeout(resolve, 500));
 		}
+
+		this.updateModalProgress(true);
 
 		const rawAudioPath = this.session.rawAudioPath;
 		const sessionDir = this.session.sessionDir;
@@ -427,7 +458,6 @@ export class TranscriptionLive {
 
 		this.isProcessingChunk = true;
 		const chunkPath = this.chunkQueue.shift()!;
-		// this.modal?.updateQueueStatus(this.chunkQueue.length);
 
 		const chunkIndex = this.session.chunksProcessed;
 		// Absolute time offset calculation
@@ -468,10 +498,15 @@ export class TranscriptionLive {
 			this.modal?.log(`Error processing chunk: ${err.message}`);
 			this.failedChunks.push(path.basename(chunkPath));
 		} finally {
-			this.session.chunksProcessed++;
-			// If not stopping, process next
-			if (this.session.status !== 'idle') {
-				this.processNextChunk();
+			if (this.session) {
+				this.session.chunksProcessed++;
+				this.updateModalProgress();
+				// If not stopping, process next
+				if (this.session.status !== 'idle') {
+					this.processNextChunk();
+				} else {
+					this.isProcessingChunk = false;
+				}
 			} else {
 				this.isProcessingChunk = false;
 			}
@@ -550,7 +585,8 @@ export class TranscriptionLive {
 				'--chunk-start', chunkStart.toString(),
 				'--session-id', this.session?.id || '',
 				'--output-format', 'jsonl',
-				'--no-diarization' // Diarization disabled for dictation
+				'--no-diarization', // Diarization disabled for dictation
+				'--input-is-normalized-wav'
 			];
 
 			const child = spawn(pyPath, args);

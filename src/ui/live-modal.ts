@@ -12,6 +12,8 @@ export class LiveTranscribeModal extends Modal {
 	private levelMeter: HTMLMeterElement;
 	private timerLabel: HTMLSpanElement;
 	private previewArea: HTMLDivElement;
+	private progressLabel: HTMLSpanElement;
+	private progressBar: HTMLProgressElement;
 	private _micDropdown: any;
 
 	private mediaStream: MediaStream | null = null;
@@ -85,6 +87,12 @@ export class LiveTranscribeModal extends Modal {
 
 		const timerRow = configSection.createDiv({ cls: 'lt-timer-row' });
 		this.timerLabel = timerRow.createEl('span', { text: '00:00', cls: 'lt-timer-label' });
+
+		const progressRow = configSection.createDiv({ cls: 'lt-progress-row', attr: {style: 'margin-top: 10px; margin-bottom: 10px; display: flex; flex-direction: column;'} });
+		this.progressLabel = progressRow.createEl('span', { cls: 'lt-progress-label', text: 'Recorded: 0s | Transcribed: 0s | Remaining: 0s' });
+		this.progressBar = progressRow.createEl('progress', { cls: 'lt-progress-bar' });
+		this.progressBar.max = 1;
+		this.progressBar.value = 0;
 
 		const previewRow = configSection.createDiv({ cls: 'lt-dictation-preview', attr: {style: 'margin-top: 10px; font-style: italic; color: var(--text-muted);'} });
 		this.previewArea = previewRow.createEl('div', { text: 'Waiting for speech...' });
@@ -259,6 +267,32 @@ export class LiveTranscribeModal extends Modal {
 	setPreviewText(text: string) {
 		if (this.previewArea) {
 			this.previewArea.textContent = text || 'Waiting for speech...';
+		}
+	}
+
+	setTranscriptionProgress(recordedSecs: number, transcribedSecs: number, isProcessing: boolean, isFinalizing: boolean) {
+		const remaining = Math.max(0, recordedSecs - transcribedSecs);
+		if (this.progressLabel) {
+			const rStr = Math.floor(recordedSecs).toString();
+			const tStr = Math.floor(transcribedSecs).toString();
+			const remStr = Math.floor(remaining).toString();
+			let label = `Recorded: ${rStr}s | Transcribed: ${tStr}s | Remaining: ${remStr}s`;
+			if (isFinalizing) {
+				label += ' (Finalizing...)';
+			} else if (isProcessing) {
+				label += ' (Transcribing...)';
+			}
+			this.progressLabel.textContent = label;
+		}
+		if (this.progressBar) {
+			const progress = recordedSecs > 0 ? Math.min(1, Math.max(0, transcribedSecs / recordedSecs)) : 0;
+			this.progressBar.value = progress;
+
+			if (isProcessing || isFinalizing) {
+				this.progressBar.addClass('lt-progress-indeterminate');
+			} else {
+				this.progressBar.removeClass('lt-progress-indeterminate');
+			}
 		}
 	}
 
