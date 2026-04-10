@@ -16,6 +16,18 @@ export interface LocalTranscriberSettings {
 	createMarkdownNote: boolean;
 	markdownInterval: number;
 	markdownPauseGap: number;
+
+	// Live Transcription Settings
+	liveChunkSeconds: number;
+	liveChunkOverlapSeconds: number;
+	liveAutoCreateNote: boolean;
+	liveOutputFolder: string;
+	liveKeepRawAudio: boolean;
+	liveDiarizationMode: "off" | "live" | "finalize";
+	liveMicDeviceId: string;
+	liveSilenceGateDb: number;
+	liveModelSize: string;
+	liveLanguage: string;
 }
 
 export const DEFAULT_SETTINGS: LocalTranscriberSettings = {
@@ -26,13 +38,25 @@ export const DEFAULT_SETTINGS: LocalTranscriberSettings = {
 	modelSize: "base.en",
 	modelsFolder: "",
 	availableModels: "tiny.en\nbase.en\nsmall.en",
-	language: "auto",
+	language: "en",
 	speakers: "0",
 	outputFormat: "SRT",
 	audioFolder: "Audio/",
 	createMarkdownNote: true,
 	markdownInterval: 5,
-	markdownPauseGap: 1.5
+	markdownPauseGap: 1.5,
+
+	// Live Transcription Settings defaults
+	liveChunkSeconds: 3,
+	liveChunkOverlapSeconds: 1,
+	liveAutoCreateNote: true,
+	liveOutputFolder: "Live_Transcripts/",
+	liveKeepRawAudio: true,
+	liveDiarizationMode: "finalize",
+	liveMicDeviceId: "default",
+	liveSilenceGateDb: -40,
+	liveModelSize: "tiny.en",
+	liveLanguage: "en"
 }
 
 export class LocalTranscriberSettingTab extends PluginSettingTab {
@@ -49,22 +73,26 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('h3', { text: 'Transcription' });
 
+		const getModelsList = () => this.plugin.settings.availableModels
+			.split('\n')
+			.map(m => m.trim())
+			.filter(m => m.length > 0);
+
 		new Setting(containerEl)
 			.setName('Model Size')
 			.setDesc('Default Whisper model size.')
-			.addDropdown(dropdown => dropdown
-				.addOption('tiny.en', 'Tiny (English)')
-				.addOption('base.en', 'Base (English)')
-				.addOption('small.en', 'Small (English)')
-				.setValue(this.plugin.settings.modelSize)
-				.onChange(async (value) => {
+			.addDropdown(dropdown => {
+				getModelsList().forEach(m => dropdown.addOption(m, m));
+				dropdown.setValue(this.plugin.settings.modelSize);
+				dropdown.onChange(async (value) => {
 					this.plugin.settings.modelSize = value;
 					await this.plugin.saveSettings();
-				}));
+				});
+			});
 
 		new Setting(containerEl)
 			.setName('Models Folder')
-			.setDesc('Absolute path to a folder containing Whisper models. Leave blank to use the plugin\'s built-in models/ folder. Useful if you already have models downloaded (e.g. via Ollama or Hugging Face).')
+			.setDesc('Absolute path to a folder containing Whisper models. Leave blank to use the plugin\'s built-in models/ folder. Useful if you already have Whisper model files available locally. Model names must be valid Python Whisper identifiers such as tiny.en, base.en, small.en, medium, or large-v3.')
 			.addText(text => text
 				.setPlaceholder('/path/to/models or C:\\models')
 				.setValue(this.plugin.settings.modelsFolder)
@@ -81,17 +109,30 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.availableModels)
 				.onChange(async (value) => {
 					this.plugin.settings.availableModels = value;
+
+					// Validate currently selected models
+					const models = getModelsList();
+					if (models.length > 0) {
+						if (!models.includes(this.plugin.settings.modelSize)) {
+							this.plugin.settings.modelSize = models[0] || 'base.en';
+						}
+						if (!models.includes(this.plugin.settings.liveModelSize)) {
+							this.plugin.settings.liveModelSize = models[0] || 'base.en';
+						}
+					}
+
 					await this.plugin.saveSettings();
+					this.display(); // refresh UI
 				}));
 
 		new Setting(containerEl)
 			.setName('Language')
-			.setDesc('Select language (e.g. "en" or "auto").')
+			.setDesc('Language code for transcription. Use "en" for English (UK). Use "auto" only if you need automatic detection.')
 			.addText(text => text
-				.setPlaceholder('auto')
+				.setPlaceholder('en')
 				.setValue(this.plugin.settings.language)
 				.onChange(async (value) => {
-					this.plugin.settings.language = value || 'auto';
+					this.plugin.settings.language = value || 'en';
 					await this.plugin.saveSettings();
 				}));
 
@@ -202,5 +243,86 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 					this.plugin.settings.installOnWindows = value;
 					await this.plugin.saveSettings();
 				}));
+
+		containerEl.createEl('h3', { text: 'Live Transcription' });
+
+		new Setting(containerEl)
+			.setName('Live Chunk Seconds')
+			.setDesc('Length of audio chunks for live transcription. Smaller chunks = faster text appearance, slightly more fragmentation. Larger chunks = slower but potentially more stable phrasing.')
+			.addText(text => text
+				.setPlaceholder('3')
+				.setValue(String(this.plugin.settings.liveChunkSeconds))
+				.onChange(async (value) => {
+					this.plugin.settings.liveChunkSeconds = parseFloat(value) || 3;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Live Chunk Overlap Seconds')
+			.setDesc('Amount of overlap between chunks to preserve boundary words. Default: 1.')
+			.addText(text => text
+				.setPlaceholder('1')
+				.setValue(String(this.plugin.settings.liveChunkOverlapSeconds))
+				.onChange(async (value) => {
+					this.plugin.settings.liveChunkOverlapSeconds = parseFloat(value) || 1;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Live Dictation Language')
+			.setDesc('Default language for live dictation. Recommended: en (English UK).')
+			.addText(text => text
+				.setPlaceholder('en')
+				.setValue(this.plugin.settings.liveLanguage)
+				.onChange(async (value) => {
+					this.plugin.settings.liveLanguage = value || 'en';
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Live Output Folder')
+			.setDesc('Where to save live transcripts and audio chunks.')
+			.addText(text => text
+				.setPlaceholder('Live_Transcripts/')
+				.setValue(this.plugin.settings.liveOutputFolder)
+				.onChange(async (value) => {
+					this.plugin.settings.liveOutputFolder = value || 'Live_Transcripts/';
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Live Diarization Strategy')
+			.setDesc('How to handle speaker diarization during live recording.')
+			.addDropdown(dropdown => dropdown
+				.addOption('off', 'Off (no speakers)')
+				.addOption('live', 'Live (per-chunk speakers, may drift)')
+				.addOption('finalize', 'Finalize (post-session pass)')
+				.setValue(this.plugin.settings.liveDiarizationMode)
+				.onChange(async (value: "off" | "live" | "finalize") => {
+					this.plugin.settings.liveDiarizationMode = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Save Raw Session Audio')
+			.setDesc('Save full session WAV file for later reprocessing.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.liveKeepRawAudio)
+				.onChange(async (value) => {
+					this.plugin.settings.liveKeepRawAudio = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Live Model Size')
+			.setDesc('Whisper model used for live transcription (smaller models recommended for latency).')
+			.addDropdown(dropdown => {
+				getModelsList().forEach(m => dropdown.addOption(m, m));
+				dropdown.setValue(this.plugin.settings.liveModelSize);
+				dropdown.onChange(async (value) => {
+					this.plugin.settings.liveModelSize = value;
+					await this.plugin.saveSettings();
+				});
+			});
 	}
 }
