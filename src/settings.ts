@@ -71,22 +71,26 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('h3', { text: 'Transcription' });
 
+		const getModelsList = () => this.plugin.settings.availableModels
+			.split('\n')
+			.map(m => m.trim())
+			.filter(m => m.length > 0);
+
 		new Setting(containerEl)
 			.setName('Model Size')
 			.setDesc('Default Whisper model size.')
-			.addDropdown(dropdown => dropdown
-				.addOption('tiny.en', 'Tiny (English)')
-				.addOption('base.en', 'Base (English)')
-				.addOption('small.en', 'Small (English)')
-				.setValue(this.plugin.settings.modelSize)
-				.onChange(async (value) => {
+			.addDropdown(dropdown => {
+				getModelsList().forEach(m => dropdown.addOption(m, m));
+				dropdown.setValue(this.plugin.settings.modelSize);
+				dropdown.onChange(async (value) => {
 					this.plugin.settings.modelSize = value;
 					await this.plugin.saveSettings();
-				}));
+				});
+			});
 
 		new Setting(containerEl)
 			.setName('Models Folder')
-			.setDesc('Absolute path to a folder containing Whisper models. Leave blank to use the plugin\'s built-in models/ folder. Useful if you already have models downloaded (e.g. via Ollama or Hugging Face).')
+			.setDesc('Absolute path to a folder containing Whisper models. Leave blank to use the plugin\'s built-in models/ folder. Useful if you already have Whisper model files available locally. Model names must be valid Python Whisper identifiers such as tiny.en, base.en, small.en, medium, or large-v3.')
 			.addText(text => text
 				.setPlaceholder('/path/to/models or C:\\models')
 				.setValue(this.plugin.settings.modelsFolder)
@@ -103,7 +107,20 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.availableModels)
 				.onChange(async (value) => {
 					this.plugin.settings.availableModels = value;
+
+					// Validate currently selected models
+					const models = getModelsList();
+					if (models.length > 0) {
+						if (!models.includes(this.plugin.settings.modelSize)) {
+							this.plugin.settings.modelSize = models[0] || 'base.en';
+						}
+						if (!models.includes(this.plugin.settings.liveModelSize)) {
+							this.plugin.settings.liveModelSize = models[0] || 'base.en';
+						}
+					}
+
 					await this.plugin.saveSettings();
+					this.display(); // refresh UI
 				}));
 
 		new Setting(containerEl)
@@ -264,14 +281,13 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Live Model Size')
 			.setDesc('Whisper model used for live transcription (smaller models recommended for latency).')
-			.addDropdown(dropdown => dropdown
-				.addOption('tiny.en', 'Tiny (Fastest)')
-				.addOption('base.en', 'Base (Recommended)')
-				.addOption('small.en', 'Small (Slower)')
-				.setValue(this.plugin.settings.liveModelSize)
-				.onChange(async (value) => {
+			.addDropdown(dropdown => {
+				getModelsList().forEach(m => dropdown.addOption(m, m));
+				dropdown.setValue(this.plugin.settings.liveModelSize);
+				dropdown.onChange(async (value) => {
 					this.plugin.settings.liveModelSize = value;
 					await this.plugin.saveSettings();
-				}));
+				});
+			});
 	}
 }

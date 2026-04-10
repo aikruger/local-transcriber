@@ -478,6 +478,31 @@ export class TranscriptionLive {
 		}
 	}
 
+	formatDictationInsertion(text: string, editor: any): string {
+		if (!text) return "";
+		let out = text.replace(/\s+/g, " ").trim();
+
+		const cursor = editor.getCursor();
+		const line = editor.getLine(cursor.line);
+		const before = cursor.ch > 0 ? line[cursor.ch - 1] : "";
+
+		const needsLeadingSpace =
+			out.length > 0 &&
+			before &&
+			!/\s/.test(before) &&
+			!/^[,.;:!?)]/.test(out);
+
+		if (needsLeadingSpace) out = " " + out;
+
+		const needsTrailingSpace =
+			out.length > 0 &&
+			!/\s$/.test(out);
+
+		if (needsTrailingSpace) out += " ";
+
+		return out;
+	}
+
 	insertLiveChunkAtCursor(text: string) {
 		const { MarkdownView } = require('obsidian');
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView) as any;
@@ -486,17 +511,9 @@ export class TranscriptionLive {
 		const editor = view.editor;
 		const cursor = editor.getCursor();
 
-		// Normalize spacing
-		let prefix = '';
-		if (cursor.ch > 0) {
-			const line = editor.getLine(cursor.line);
-			const prevChar = line.charAt(cursor.ch - 1);
-			if (!/\s/.test(prevChar) && !/[.,!?]/.test(prevChar)) {
-				prefix = ' ';
-			}
-		}
+		const insertText = this.formatDictationInsertion(text, editor);
+		if (!insertText) return;
 
-		const insertText = prefix + text;
 		editor.replaceRange(insertText, cursor);
 
 		// Move cursor to the end of the inserted text
