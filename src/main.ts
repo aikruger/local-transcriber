@@ -114,55 +114,13 @@ export default class LocalTranscriberPlugin extends Plugin {
 					new Notice('No live transcription session running.');
 				}
 			}
-
-			if (!fs.existsSync(modelsDir)) {
-				fs.mkdirSync(modelsDir, { recursive: true });
-			}
-
-			const pyPath = this.getPythonExecutable();
-			const child = spawn(pyPath, [bootstrapScript, '--models-dir', modelsDir]);
-
-			let stderrOutput = '';
-			child.stderr.on('data', (data) => {
-				stderrOutput += data.toString();
-				const lines = data.toString().split('\n').filter((l: string) => l.trim());
-				for (const line of lines) {
-					modal.log(`[stderr] ${line}`);
-				}
-			});
-
-			child.stdout.on('data', (data) => {
-				const lines = data.toString().split('\n').filter((l: string) => l.trim());
-				for (const line of lines) {
-					try {
-						const msg = JSON.parse(line);
-						if (msg.status === 'installing') modal.log(`Installing: ${msg.package}...`);
-						else if (msg.status === 'downloading_model') modal.log(`Downloading model: ${msg.model}...`);
-						else if (msg.status === 'done') modal.log('Bootstrap complete.');
-					} catch (e) {
-						modal.log(line);
-					}
-				}
-			});
-
-			child.on('close', (code) => {
-				if (code === 0) resolve();
-				else {
-					reject(new Error(
-						`Bootstrap failed with code ${code}.\n` +
-						(stderrOutput ? `Python error:\n${stderrOutput}` : 'No stderr output captured.')
-					));
-				}
-			});
 		});
-	}
 
 		this.statusBarItem.onClickEvent(() => {
 			if (this.transcriptionLive.isRecording()) {
 				this.transcriptionLive.handleTranscribeLive();
 			}
 		});
-	}
 
 		this.addCommand({
 			id: 'check-live-transcription-environment',
