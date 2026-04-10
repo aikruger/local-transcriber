@@ -496,7 +496,20 @@ export class TranscriptionLive {
 			}
 		}
 
-		editor.replaceRange(prefix + text, cursor);
+		const insertText = prefix + text;
+		editor.replaceRange(insertText, cursor);
+
+		// Move cursor to the end of the inserted text
+		const lines = insertText.split('\n');
+		const lastLine = lines[lines.length - 1] || '';
+		if (lines.length === 1) {
+			editor.setCursor({ line: cursor.line, ch: cursor.ch + lastLine.length });
+		} else {
+			editor.setCursor({
+				line: cursor.line + lines.length - 1,
+				ch: lastLine.length
+			});
+		}
 	}
 
 	async processChunk(chunkPath: string, chunkStart: number): Promise<unknown> {
