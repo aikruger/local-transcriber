@@ -6,3 +6,97 @@ available in the app when your plugin is enabled.
 If your plugin does not need CSS, delete this file.
 
 */
+
+.local-transcriber-modal {
+  padding: 0 8px;
+  width: 600px !important;
+  max-width: 90vw !important;
+}
+
+.local-transcriber-modal .modal-content {
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+/* ── Config section ── */
+.lt-config-section { margin-bottom: 12px; }
+
+.lt-btn-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: 12px 0;
+}
+.lt-transcribe-btn { padding: 8px 20px; font-size: 1em; }
+
+/* ── Run section ── */
+.lt-run-section {
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 12px;
+  margin-top: 4px;
+}
+.lt-hidden { display: none !important; }
+
+/* ── Progress ── */
+.lt-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 16px 0;
+}
+.lt-progress-label {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  min-width: 180px;
+}
+.lt-progress-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  accent-color: var(--interactive-accent);
+}
+
+@keyframes lt-pulse {
+  0%   { opacity: 1; }
+  50%  { opacity: 0.5; }
+  100% { opacity: 1; }
+}
+.lt-progress-indeterminate {
+  animation: lt-pulse 1.5s ease-in-out infinite;
+}
+
+/* ── Log area ── */
+.lt-log-area {
+  min-height: 80px;
+  max-height: 180px;
+  overflow-y: auto;
+  font-family: monospace;
+  font-size: 0.8em;
+  white-space: pre-wrap;
+  background: var(--background-secondary);
+  padding: 8px 10px;
+  border-radius: 5px;
+  margin-bottom: 8px;
+  resize: vertical;
+}
+
+/* ── Preview area ── */
+.lt-preview-area {
+  min-height: 160px;
+  max-height: 320px;
+  overflow-y: auto;
+  font-size: 0.85em;
+  line-height: 1.6;
+  background: var(--background-primary-alt);
+  padding: 8px 10px;
+  border-radius: 5px;
+  resize: vertical;
+}
+
+.lt-log-line { color: var(--text-muted); }
+.lt-preview-line { margin-bottom: 2px; }
+
+/* ── Locked modal (transcription running) ── */
+.lt-locked {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
