@@ -116,8 +116,7 @@ export class LiveTranscribeModal extends Modal {
 
 	async populateMics() {
 		try {
-			const permStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-			permStream.getTracks().forEach(t => t.stop());
+			await navigator.mediaDevices.getUserMedia({ audio: true });
 			const devices = await navigator.mediaDevices.enumerateDevices();
 			const audioInputs = devices.filter(d => d.kind === 'audioinput');
 			for (const dev of audioInputs) {

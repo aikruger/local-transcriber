@@ -9,74 +9,18 @@ export class OllamaFileBackend implements FileTranscriptionBackend {
     constructor(private plugin: LocalTranscriberPlugin) {}
 
     async transcribeFile(options: FileTranscriptionOptions, onEvent: (event: TranscriptionEvent) => void): Promise<{ segments: Segment[] }> {
-        return new Promise((resolve, reject) => {
-            const app = this.plugin.app;
+        return new Promise(async (resolve, reject) => {
+            onEvent({ type: 'meta', backend: 'ollama', model: options.modelId });
 
-            const adapter: any = app.vault.adapter;
-            const vaultPath = adapter && adapter.getBasePath ? adapter.getBasePath() : '';
-            const pluginDir = path.join(vaultPath, app.vault.configDir, 'plugins', 'local-transcriber');
-            const transcribeScript = path.join(pluginDir, 'local_transcriber', 'transcribe_ollama.py');
-            const pyPath = this.plugin.pythonEnv.getPythonExecutable();
+            // Since Ollama does not natively support an audio upload endpoint,
+            // the user will experience hallucinated texts (like "I don't see an image")
+            // if we blindly pass base64 audio to the images array of the generate API.
+            // Until Ollama officially adds /api/audio or multimodal audio input, we cannot
+            // transcribe via pure Ollama.
+            // However, some custom API proxies or forks might accept it.
+            // To prevent a confusing UX, we throw a clear error.
 
-            const child = spawn(pyPath, [
-                transcribeScript,
-                '--input', options.inputPath,
-                '--model', options.modelId
-            ]);
-
-            let finalJson = '';
-            let rawStdout = '';
-            let segments: Segment[] = [];
-
-            child.stdout.on('data', (chunk) => {
-                const text = chunk.toString();
-                rawStdout += text;
-                const lines = text.split('\n').filter((l: string) => l.trim());
-                for (const line of lines) {
-                    if (line.startsWith('{')) {
-                        try {
-                            const msg = JSON.parse(line);
-                            msg.backend = 'ollama';
-                            onEvent(msg);
-
-                            if (msg.type === 'segment') {
-                                segments.push(msg);
-                            } else if (msg.type === 'result') {
-                                finalJson = line;
-                                if (msg.segments) segments = msg.segments;
-                            }
-                        } catch {
-                        }
-                    }
-                }
-            });
-
-            let stderrOutput = '';
-            child.stderr.on('data', (data) => {
-                stderrOutput += data.toString();
-            });
-
-            child.on('close', (code) => {
-                if (code !== 0) {
-                    reject(new Error(`Process failed with code ${code}.\n${stderrOutput || 'No stderr.'}`));
-                    return;
-                }
-
-                if (finalJson) {
-                    try {
-                        const parsed = JSON.parse(finalJson);
-                        if (parsed.error) {
-                            reject(new Error(parsed.error));
-                            return;
-                        }
-                        resolve({ segments: parsed.segments || segments });
-                        return;
-                    } catch {
-                    }
-                }
-
-                resolve({ segments });
-            });
+            reject(new Error(`Audio transcription is not natively supported by the standard Ollama API yet. Sending audio to '${options.modelId}' directly causes it to hallucinate. Please select a Python Whisper model.`));
         });
     }
 }

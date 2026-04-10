@@ -1,0 +1,12 @@
+--- src/ui/live-modal.ts
++++ src/ui/live-modal.ts
+@@ -117,7 +117,8 @@
+
+	async populateMics() {
+		try {
+-			await navigator.mediaDevices.getUserMedia({ audio: true });
++			const permStream = await navigator.mediaDevices.getUserMedia({ audio: true });
++			permStream.getTracks().forEach(t => t.stop());
+			const devices = await navigator.mediaDevices.enumerateDevices();
+			const audioInputs = devices.filter(d => d.kind === 'audioinput');
+			for (const dev of audioInputs) {
