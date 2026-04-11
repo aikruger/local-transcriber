@@ -219,7 +219,9 @@ export class TranscriptionLive {
 					for (let i = 0; i < dataCopy.length; i++) {
 						buf.writeFloatLE(dataCopy[i] || 0, i * 4);
 					}
-					fs.appendFileSync(this.tempPcmPath, buf);
+					fs.appendFile(this.tempPcmPath, buf, (err: any) => {
+							if (err) console.error('Failed to append PCM chunk', err);
+						});
 				}
 
 				const totalSamplesSoFar = this.chunkBufferSamples.reduce((acc, val) => acc + val.length, 0);

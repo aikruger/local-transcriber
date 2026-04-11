@@ -55,7 +55,11 @@ export class TranscriptionFile {
 				modal.setStage('Transcribing');
 				const result: any = await this.processFile(filePath, modal, modal.selectedModel ?? this.plugin.settings.modelSize, modal.selectedSpeakers ?? this.plugin.settings.speakers);
 
-				modal.setStage('Saving outputs');
+
+					if (modal.selectedSpeakers !== '0' && result.segments && !result.segments.some((s: any) => !!s.speaker)) {
+						new Notice('Diarization did not produce speaker labels; check Python/Pyannote setup.');
+					}
+					modal.setStage('Saving outputs');
 				await this.plugin.outputWriters.saveOutputs(file.basename, result.segments, modal.selectedInterval, modal.selectedPauseGap);
 
 				modal.setStage('Done');
@@ -126,7 +130,11 @@ export class TranscriptionFile {
 				modal.setStage('Transcribing');
 				const result: any = await this.processFile(filePath, modal, modal.selectedModel ?? this.plugin.settings.modelSize, modal.selectedSpeakers ?? this.plugin.settings.speakers);
 
-				modal.setStage('Saving outputs');
+
+					if (modal.selectedSpeakers !== '0' && result.segments && !result.segments.some((s: any) => !!s.speaker)) {
+						new Notice('Diarization did not produce speaker labels; check Python/Pyannote setup.');
+					}
+					modal.setStage('Saving outputs');
 				await this.plugin.outputWriters.saveOutputs(stem, result.segments, modal.selectedInterval, modal.selectedPauseGap);
 
 				modal.setStage('Done');
