@@ -3,9 +3,9 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import { execFile, spawn } from 'child_process';
-import LocalTranscriberPlugin from './main';
+import LocalTranscriberPlugin from '../main';
 
-export class Environment {
+export class PythonEnvironment {
 	plugin: LocalTranscriberPlugin;
 	app: App;
 

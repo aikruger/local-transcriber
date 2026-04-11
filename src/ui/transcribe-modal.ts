@@ -1,38 +1,21 @@
-import { App, Modal, Notice, Setting } from 'obsidian';
+import { App, Modal, Setting } from 'obsidian';
 import LocalTranscriberPlugin from '../main';
 
 export class TranscribeModal extends Modal {
-	private plugin: LocalTranscriberPlugin;
+	plugin: LocalTranscriberPlugin;
+
 	selectedModel: string;
 	selectedSpeakers: string;
 	selectedInterval: number;
 	selectedPauseGap: number;
 
-	private logArea: HTMLDivElement;
-	private progressBar: HTMLProgressElement;
-	private progressLabel: HTMLSpanElement;
-	private previewArea: HTMLDivElement;
-	private runSection: HTMLDivElement;
 	transcribeBtn: HTMLButtonElement;
+	progressBar: HTMLElement;
+	logArea: HTMLElement;
+	previewArea: HTMLElement;
 
-	private _modelDropdown: any;
-	private _speakerDropdown: any;
-	private _intervalDropdown: any;
-	private _pauseInput: any;
-
+	private _onTranscribeClick: (() => void) | null = null;
 	public _isRunning = false;
-	private _onTranscribeClick?: () => void;
-
-	private stages = [
-		{ name: 'Checking environment', pct: 5 },
-		{ name: 'Installing dependencies', pct: 15 },
-		{ name: 'Bootstrapping models', pct: 25 },
-		{ name: 'Preparing audio', pct: 35 },
-		{ name: 'Transcribing', pct: 40 },
-		{ name: 'Diarizing speakers', pct: 85 },
-		{ name: 'Saving outputs', pct: 95 },
-		{ name: 'Done', pct: 100 },
-	];
 
 	constructor(app: App, plugin: LocalTranscriberPlugin) {
 		super(app);
@@ -45,146 +28,116 @@ export class TranscribeModal extends Modal {
 
 	onOpen() {
 		const { contentEl } = this;
-		contentEl.empty();
-		contentEl.addClass('local-transcriber-modal');
-		contentEl.createEl('h2', { text: '🔊 Transcriber' });
+		this.titleEl.setText('Transcribe Audio/Video');
 
-		const configSection = contentEl.createDiv({ cls: 'lt-config-section' });
+		const fileModels = this.plugin.modelRegistry.getModelsByMode("file");
 
-		const models = this.plugin.settings.availableModels
-			.split('\n')
-			.map(m => m.trim())
-			.filter(m => m.length > 0);
-
-		if (models.length > 0) {
-			new Setting(configSection)
-				.setName('Model')
-				.setDesc('Select Whisper model for this transcription')
-				.addDropdown((dd: any) => {
-					models.forEach(m => dd.addOption(m, m));
-					dd.setValue(this.selectedModel);
-					dd.onChange((val: string) => { this.selectedModel = val; });
-					this._modelDropdown = dd;
+		new Setting(contentEl)
+			.setName('Model')
+			.setDesc('Select the transcription model.')
+			.addDropdown(dropdown => {
+				fileModels.forEach(m => dropdown.addOption(`${m.backend}::${m.id}`, m.label));
+				dropdown.setValue(this.selectedModel);
+				dropdown.onChange(value => {
+					this.selectedModel = value;
 				});
-		}
+			});
 
-		new Setting(configSection)
+		new Setting(contentEl)
 			.setName('Speakers')
-			.setDesc('Number of speakers to identify. 0 = disable diarization.')
-			.addDropdown((dd: any) => {
-				['0','auto','2','3','4','6'].forEach(v =>
-					dd.addOption(v, v === '0' ? 'None' : v === 'auto' ? 'Auto-detect' : `${v} speakers`)
-				);
-				dd.setValue(this.selectedSpeakers);
-				dd.onChange((val: string) => { this.selectedSpeakers = val; });
-				this._speakerDropdown = dd;
-			});
+			.setDesc('Number of speakers.')
+			.addDropdown(dropdown => dropdown
+				.addOption('0', 'None')
+				.addOption('auto', 'Auto-detect')
+				.addOption('2', '2 speakers')
+				.addOption('3', '3 speakers')
+				.addOption('4', '4 speakers')
+				.setValue(this.selectedSpeakers)
+				.onChange(value => {
+					this.selectedSpeakers = value;
+				})
+			);
 
-		new Setting(configSection)
-			.setName('Paragraph interval')
-			.setDesc('Group markdown into timed paragraphs.')
-			.addDropdown((dd: any) => {
-				[['0','None'],['1','1 min'],['2','2 min'],['5','5 min'],['10','10 min']]
-					.forEach(([v, l]) => dd.addOption(v, l));
-				dd.setValue(String(this.selectedInterval));
-				dd.onChange((val: string) => { this.selectedInterval = parseInt(val, 10); });
-				this._intervalDropdown = dd;
-			});
+		const controlsDiv = contentEl.createDiv({ cls: 'transcribe-modal-controls' });
+		controlsDiv.style.marginTop = '20px';
+		controlsDiv.style.textAlign = 'right';
 
-		new Setting(configSection)
-			.setName('Pause gap (s)')
-			.setDesc('Silence gap that triggers a paragraph break.')
-			.addText((text: any) => {
-				text.setPlaceholder('1.5').setValue(String(this.selectedPauseGap));
-				text.inputEl.style.width = '60px';
-				text.onChange((val: string) => { this.selectedPauseGap = parseFloat(val) || 1.5; });
-				this._pauseInput = text;
-			});
+		this.transcribeBtn = controlsDiv.createEl('button', { text: 'Transcribe' });
+		this.transcribeBtn.addClass('mod-cta');
+		this.transcribeBtn.onclick = () => {
+			if (!this._isRunning && this._onTranscribeClick) {
+				this._onTranscribeClick();
+			}
+		};
 
-		const btnRow = contentEl.createDiv({ cls: 'lt-btn-row' });
-		this.transcribeBtn = btnRow.createEl('button', {
-			text: '▶ Start Transcription',
-			cls: 'mod-cta lt-transcribe-btn',
-		});
-		this.transcribeBtn.addEventListener('click', () => {
-			if (this._onTranscribeClick) this._onTranscribeClick();
-		});
+		const progressDiv = contentEl.createDiv();
+		progressDiv.style.marginTop = '20px';
+		progressDiv.style.height = '10px';
+		progressDiv.style.backgroundColor = 'var(--background-modifier-border)';
+		progressDiv.style.borderRadius = '5px';
+		progressDiv.style.overflow = 'hidden';
 
-		this.runSection = contentEl.createDiv({ cls: 'lt-run-section lt-hidden' });
+		this.progressBar = progressDiv.createDiv();
+		this.progressBar.style.height = '100%';
+		this.progressBar.style.width = '0%';
+		this.progressBar.style.backgroundColor = 'var(--interactive-accent)';
+		this.progressBar.style.transition = 'width 0.2s ease-in-out';
 
-		const progressRow = this.runSection.createDiv({ cls: 'lt-progress-row' });
-		this.progressLabel = progressRow.createEl('span', {
-			cls: 'lt-progress-label',
-			text: 'Waiting...',
-		});
-		this.progressBar = progressRow.createEl('progress');
-		this.progressBar.max = 100;
-		this.progressBar.value = 0;
-		this.progressBar.addClass('lt-progress-bar');
+		this.logArea = contentEl.createEl('div');
+		this.logArea.style.marginTop = '10px';
+		this.logArea.style.fontSize = '0.9em';
+		this.logArea.style.color = 'var(--text-muted)';
+		this.logArea.innerText = 'Ready.';
 
-		this.runSection.createEl('h4', { text: 'Log' });
-		this.logArea = this.runSection.createDiv({ cls: 'lt-log-area' });
-
-		this.runSection.createEl('h4', { text: 'Live Transcript Preview' });
-		this.previewArea = this.runSection.createDiv({ cls: 'lt-preview-area' });
+		this.previewArea = contentEl.createEl('div');
+		this.previewArea.style.marginTop = '20px';
+		this.previewArea.style.padding = '10px';
+		this.previewArea.style.border = '1px solid var(--background-modifier-border)';
+		this.previewArea.style.borderRadius = '5px';
+		this.previewArea.style.minHeight = '100px';
+		this.previewArea.style.maxHeight = '200px';
+		this.previewArea.style.overflowY = 'auto';
+		this.previewArea.style.fontSize = '0.9em';
+		this.previewArea.innerText = 'Transcript preview will appear here...';
 	}
 
-	onTranscribeClick(callback: () => void) {
-		this._onTranscribeClick = callback;
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+	}
+
+	onTranscribeClick(cb: () => void) {
+		this._onTranscribeClick = cb;
 	}
 
 	startRunning() {
 		this._isRunning = true;
-		this.modalEl.addClass('lt-locked');
-
-		[this._modelDropdown, this._speakerDropdown, this._intervalDropdown]
-			.forEach(dd => { if (dd) dd.selectEl.disabled = true; });
-		if (this._pauseInput) this._pauseInput.inputEl.disabled = true;
-
-		this.transcribeBtn.textContent = '⏳ Transcribing...';
 		this.transcribeBtn.disabled = true;
-		this.runSection.removeClass('lt-hidden');
+		this.transcribeBtn.textContent = 'Transcribing...';
+		this.setProgress(0);
+		this.previewArea.innerText = '';
 	}
 
-	setStage(stageName: string) {
-		const stage = this.stages.find(s => s.name === stageName);
-		if (!stage) return;
-		this.progressBar.value = stage.pct;
-		this.progressLabel.textContent = stage.name + '...';
+	setStage(stage: string) {
+		this.logArea.innerText = stage + '...';
+	}
 
-		const longStages = ['Bootstrapping models', 'Transcribing', 'Diarizing speakers'];
-		if (longStages.includes(stageName)) {
-			this.progressBar.addClass('lt-progress-indeterminate');
-		} else {
-			this.progressBar.removeClass('lt-progress-indeterminate');
+	log(msg: string) {
+		this.logArea.innerText = msg;
+	}
+
+	setProgress(percent: number) {
+		this.progressBar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+	}
+
+	appendPreview(text: string) {
+		if (this.previewArea.innerText === 'Transcript preview will appear here...') {
+			this.previewArea.innerText = '';
 		}
-	}
-
-	setProgress(pct: number) {
-		this.progressBar.value = Math.min(Math.max(pct, 0), 100);
-	}
-
-	log(text: string) {
-		if (!this.logArea) return;
-		this.logArea.createEl('div', { cls: 'lt-log-line', text });
-		this.logArea.scrollTop = this.logArea.scrollHeight;
-	}
-
-	appendPreview(line: string) {
-		if (!this.previewArea) return;
-		this.previewArea.createEl('div', { cls: 'lt-preview-line', text: line });
+		const p = document.createElement('div');
+		p.innerText = text;
+		p.style.marginBottom = '5px';
+		this.previewArea.appendChild(p);
 		this.previewArea.scrollTop = this.previewArea.scrollHeight;
-	}
-
-	close() {
-		if (this._isRunning) {
-			new Notice('Transcription in progress. Please wait until it finishes.');
-			return;
-		}
-		super.close();
-	}
-
-	onClose() {
-		this.contentEl.empty();
 	}
 }

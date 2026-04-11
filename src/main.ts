@@ -1,21 +1,29 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, TFile, Setting } from 'obsidian';
+import { App, Notice, Plugin, TFile } from 'obsidian';
 import { DEFAULT_SETTINGS, LocalTranscriberSettings, LocalTranscriberSettingTab } from "./settings";
-import * as path from 'path';
-import { Environment } from './environment';
+import { PythonEnvironment } from './environment/python';
+import { OllamaEnvironment } from './environment/ollama';
 import { OutputWriters } from './output-writers';
 import { TranscriptionFile } from './transcription-file';
 import { TranscriptionLive } from './transcription-live';
 import { LiveSessionManager } from './live-session';
+import { Diagnostics } from './diagnostics';
+import { ModelRegistry } from './models/registry';
+import { ModelDiscovery } from './models/discovery';
 
 export default class LocalTranscriberPlugin extends Plugin {
 	settings: LocalTranscriberSettings;
 	statusBarItem: HTMLElement;
 
-	environment: Environment;
+	pythonEnv: PythonEnvironment;
+	ollamaEnv: OllamaEnvironment;
 	outputWriters: OutputWriters;
 	transcriptionFile: TranscriptionFile;
 	transcriptionLive: TranscriptionLive;
 	liveSessionManager: LiveSessionManager;
+	diagnostics: Diagnostics;
+
+	modelRegistry: ModelRegistry;
+	modelDiscovery: ModelDiscovery;
 
 	async onload() {
 		await this.loadSettings();
@@ -23,15 +31,21 @@ export default class LocalTranscriberPlugin extends Plugin {
 		this.statusBarItem = this.addStatusBarItem();
 		this.statusBarItem.setText('');
 
-		this.environment = new Environment(this);
+		this.pythonEnv = new PythonEnvironment(this);
+		this.ollamaEnv = new OllamaEnvironment();
 		this.outputWriters = new OutputWriters(this);
 		this.transcriptionFile = new TranscriptionFile(this);
 		this.liveSessionManager = new LiveSessionManager(this);
 		this.transcriptionLive = new TranscriptionLive(this);
+		this.diagnostics = new Diagnostics(this);
 
-		// Check environment on load if not ready
+		this.modelRegistry = new ModelRegistry();
+		this.modelDiscovery = new ModelDiscovery(this.modelRegistry, this.ollamaEnv);
+
+		this.modelDiscovery.refreshAll(this.settings.availableModels).catch(e => console.error("Failed to load models on startup", e));
+
 		if (!this.settings.envReady) {
-			this.environment.hasPython().then(hasPy => {
+			this.pythonEnv.hasPython().then(hasPy => {
 				if (hasPy) {
 					this.settings.envReady = true;
 					this.saveSettings();
@@ -70,29 +84,40 @@ export default class LocalTranscriberPlugin extends Plugin {
 			id: 'transcribe-external-file',
 			name: 'Transcribe external file',
 			callback: async () => {
-				const input = document.createElement('input');
-				input.type = 'file';
-				input.accept = 'audio/*,video/*';
-				input.style.display = 'none';
-				document.body.appendChild(input);
+				let electron;
+				try {
+					electron = require('electron');
+				} catch { }
 
-				input.onchange = async (e: any) => {
-					const files = e.target.files;
-					if (files && files.length > 0) {
-						const file = files[0];
-						// Obsidian/Electron specific: File object has `.path`
-						const filePath = file.path;
-						const fileName = file.name;
-						if (filePath) {
-							await this.transcriptionFile.handleTranscribeExternal(filePath, fileName);
-						} else {
-							new Notice('Failed to get absolute path of file.');
+				if (electron && electron.remote && electron.remote.dialog) {
+					const result = await electron.remote.dialog.showOpenDialog({
+						properties: ['openFile'],
+						filters: [{ name: 'Media', extensions: ['mp3', 'wav', 'm4a', 'ogg', 'mp4', 'mkv', 'avi', 'mov', 'webm'] }]
+					});
+					if (result.canceled || !result.filePaths.length) return;
+					const filePath = result.filePaths[0];
+					const fileName = require('path').basename(filePath);
+					await this.transcriptionFile.handleTranscribeExternal(filePath, fileName);
+				} else {
+					const { Modal, Setting } = require('obsidian');
+					class PathModal extends Modal {
+						filepath: string = '';
+						constructor(app: any) { super(app); }
+						onOpen() {
+							const { contentEl } = this;
+							this.titleEl.setText('Enter File Path');
+							new Setting(contentEl).setName('File Path').setDesc('Enter absolute path to media file').addText((text: any) => text.onChange((value: string) => this.filepath = value));
+							new Setting(contentEl).addButton((btn: any) => btn.setButtonText('Transcribe').setCta().onClick(() => {
+								this.close();
+								const fileName = require('path').basename(this.filepath);
+								// @ts-ignore
+								this.app.plugins.getPlugin('local-transcriber').transcriptionFile.handleTranscribeExternal(this.filepath, fileName);
+							}));
 						}
+						onClose() { this.contentEl.empty(); }
 					}
-					document.body.removeChild(input);
-				};
-
-				input.click();
+					new PathModal(this.app).open();
+				}
 			}
 		});
 
@@ -114,120 +139,23 @@ export default class LocalTranscriberPlugin extends Plugin {
 					new Notice('No live transcription session running.');
 				}
 			}
-
-			if (!fs.existsSync(modelsDir)) {
-				fs.mkdirSync(modelsDir, { recursive: true });
-			}
-
-			const pyPath = this.getPythonExecutable();
-			const child = spawn(pyPath, [bootstrapScript, '--models-dir', modelsDir]);
-
-			let stderrOutput = '';
-			child.stderr.on('data', (data) => {
-				stderrOutput += data.toString();
-				const lines = data.toString().split('\n').filter((l: string) => l.trim());
-				for (const line of lines) {
-					modal.log(`[stderr] ${line}`);
-				}
-			});
-
-			child.stdout.on('data', (data) => {
-				const lines = data.toString().split('\n').filter((l: string) => l.trim());
-				for (const line of lines) {
-					try {
-						const msg = JSON.parse(line);
-						if (msg.status === 'installing') modal.log(`Installing: ${msg.package}...`);
-						else if (msg.status === 'downloading_model') modal.log(`Downloading model: ${msg.model}...`);
-						else if (msg.status === 'done') modal.log('Bootstrap complete.');
-					} catch (e) {
-						modal.log(line);
-					}
-				}
-			});
-
-			child.on('close', (code) => {
-				if (code === 0) resolve();
-				else {
-					reject(new Error(
-						`Bootstrap failed with code ${code}.\n` +
-						(stderrOutput ? `Python error:\n${stderrOutput}` : 'No stderr output captured.')
-					));
-				}
-			});
 		});
-	}
+
+		this.addCommand({
+			id: 'check-live-transcription-environment',
+			name: 'Check live transcription environment',
+			callback: async () => {
+				await this.diagnostics.runDiagnostics();
+			}
+		});
+
+		this.addSettingTab(new LocalTranscriberSettingTab(this.app, this));
 
 		this.statusBarItem.onClickEvent(() => {
 			if (this.transcriptionLive.isRecording()) {
 				this.transcriptionLive.handleTranscribeLive();
 			}
 		});
-	}
-
-		this.addCommand({
-			id: 'check-live-transcription-environment',
-			name: 'Check live transcription environment',
-			callback: async () => {
-				await this.runDiagnostics();
-			}
-		});
-
-		this.addSettingTab(new LocalTranscriberSettingTab(this.app, this));
-	}
-
-	async runDiagnostics() {
-		new Notice('Running diagnostics...');
-		try {
-			const pyPath = this.environment.getPythonExecutable();
-
-			// Check python imports
-			const checkScript = `
-import sys
-try:
-	import whisper
-	import pyannote.audio
-	import soundfile
-	import numpy
-	print('OK')
-except Exception as e:
-	print(f'Error: {e}')
-	sys.exit(1)
-			`;
-
-			const { exec } = require('child_process');
-			const fs = require('fs');
-			const util = require('util');
-			const execPromise = util.promisify(exec);
-
-			const result = await execPromise(`"${pyPath}" -c "${checkScript.replace(/\n/g, '; ')}"`);
-			if (result.stdout.trim() === 'OK') {
-				new Notice('✅ Python imports OK (whisper, pyannote, soundfile, numpy)');
-			}
-
-			const hasMic = await navigator.mediaDevices.getUserMedia({ audio: true }).then(() => true).catch(() => false);
-			if (hasMic) {
-				new Notice('✅ Microphone access OK');
-			} else {
-				new Notice('❌ Microphone access denied or unavailable');
-			}
-
-			const folderPath = this.settings.liveOutputFolder;
-			const adapter = this.app.vault.adapter as any;
-			if (!await adapter.exists(folderPath.replace(/\/$/, ''))) {
-				await this.app.vault.createFolder(folderPath.replace(/\/$/, ''));
-			}
-			new Notice('✅ Write permissions to output folder OK');
-
-			const hasFf = await this.environment.hasFFmpeg();
-			if (hasFf) {
-				new Notice('✅ FFmpeg OK');
-			} else {
-				new Notice('❌ FFmpeg not found');
-			}
-
-		} catch (e: any) {
-			new Notice(`❌ Diagnostics failed: ${e.message}`);
-		}
 	}
 
 	onunload() {

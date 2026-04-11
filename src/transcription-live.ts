@@ -2,9 +2,10 @@ import { App, Notice } from 'obsidian';
 import LocalTranscriberPlugin from './main';
 import { LiveTranscribeModal } from './ui/live-modal';
 import { LiveTranscriptionSession, LiveSegment } from './live-session';
+import { PythonWhisperLiveBackend } from './transcription/live/python-whisper';
+import { OllamaLiveBackend } from './transcription/live/ollama';
 import * as path from 'path';
 import * as fs from 'fs';
-import { spawn } from 'child_process';
 
 export class TranscriptionLive {
 	plugin: LocalTranscriberPlugin;
@@ -21,7 +22,9 @@ export class TranscriptionLive {
 	private mediaStream: MediaStream | null = null;
 	private processor: ScriptProcessorNode | null = null;
 	private sourceNode: MediaStreamAudioSourceNode | null = null;
-	private recordedSamples: Float32Array[] = [];
+	private chunkBufferSamples: Float32Array[] = [];
+	private tempPcmPath: string | null = null;
+	private totalRecordedSamplesCount: number = 0;
 	private recordingOffset: number = 0;
 	private sampleRate: number = 16000;
 
@@ -51,10 +54,18 @@ export class TranscriptionLive {
 				if (this.isPaused()) {
 					await this.resumeLiveSession();
 				} else {
-					await this.plugin.environment.setupWhisperEnvironment({
-						log: (msg) => console.log(`[Dictation] ${msg}`),
-						setStage: (stage) => console.log(`[Dictation Stage] ${stage}`)
-					});
+					const fullModelId = this.plugin.settings.liveModelSize;
+					const backendStr = fullModelId.split('::')[0];
+					if (backendStr === 'python-whisper') {
+						await this.plugin.pythonEnv.setupWhisperEnvironment({
+							log: (msg) => console.log(`[Dictation] ${msg}`),
+							setStage: (stage) => console.log(`[Dictation Stage] ${stage}`)
+						});
+					} else if (backendStr === 'ollama') {
+						if (!await this.plugin.ollamaEnv.isOllamaRunning()) {
+							throw new Error("Ollama is not running.");
+						}
+					}
 					await this.startLiveSession(micId);
 				}
 			} catch (err: any) {
@@ -131,8 +142,6 @@ export class TranscriptionLive {
 
 		const adapter = this.app.vault.adapter as any;
 
-		// Use a temp path outside the vault where possible, or a hidden plugin temp subfolder.
-		// Since we use vault adapters, let's use a hidden plugin folder.
 		const folderPath = this.app.vault.configDir + '/plugins/local-transcriber/tmp/';
 		const sessionDirPath = `${folderPath}${sessionId}/`;
 
@@ -161,11 +170,11 @@ export class TranscriptionLive {
 			startedAt: timestamp,
 			status: 'recording',
 			micDeviceId: micId,
-			model: this.plugin.settings.liveModelSize || 'base.en',
+			model: this.plugin.settings.liveModelSize || 'python-whisper::base.en',
 			language: this.plugin.settings.liveLanguage || 'en',
 			speakers: this.plugin.settings.liveDiarizationMode || 'finalize',
-			chunkSeconds: this.plugin.settings.liveChunkSeconds || 10,
-			overlapSeconds: this.plugin.settings.liveChunkOverlapSeconds || 2,
+			chunkSeconds: this.plugin.settings.liveChunkSeconds || 3,
+			overlapSeconds: this.plugin.settings.liveChunkOverlapSeconds || 0.75,
 			sessionDir: sessionDirPath,
 			rawAudioPath: userRawPath,
 			chunksProcessed: 0,
@@ -179,15 +188,17 @@ export class TranscriptionLive {
 
 		await this.plugin.liveSessionManager.initSessionNote(this.session);
 
-		// Setup PCM capture
 		try {
 			this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: micId } });
 			this.audioContext = new AudioContext({ sampleRate: this.sampleRate });
 			this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
 
-			// Use ScriptProcessorNode for wide compatibility and direct PCM access
 			this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
-			this.recordedSamples = [];
+			this.chunkBufferSamples = [];
+			this.totalRecordedSamplesCount = 0;
+			const adapter = this.app.vault.adapter as any;
+			const basePath = adapter.getBasePath();
+			this.tempPcmPath = path.join(basePath, this.session.sessionDir, 'raw.pcm');
 			this.recordingOffset = 0;
 
 			const samplesPerChunk = this.session.chunkSeconds * this.sampleRate;
@@ -199,26 +210,34 @@ export class TranscriptionLive {
 				const inputData = e.inputBuffer.getChannelData(0);
 				const dataCopy = new Float32Array(inputData.length);
 				dataCopy.set(inputData);
-				this.recordedSamples.push(dataCopy);
+				this.chunkBufferSamples.push(dataCopy);
+				this.totalRecordedSamplesCount += dataCopy.length;
 
-				const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
+				// Append to temp PCM file directly
+				if (this.tempPcmPath) {
+					const buf = Buffer.alloc(dataCopy.length * 4);
+					for (let i = 0; i < dataCopy.length; i++) {
+						buf.writeFloatLE(dataCopy[i] || 0, i * 4);
+					}
+					fs.appendFile(this.tempPcmPath, buf, (err: any) => {
+							if (err) console.error('Failed to append PCM chunk', err);
+						});
+				}
+
+				const totalSamplesSoFar = this.chunkBufferSamples.reduce((acc, val) => acc + val.length, 0);
 
 				if (totalSamplesSoFar - this.recordingOffset >= samplesPerChunk) {
-					// We have enough data for a chunk
 					this.extractAndQueueChunk(this.recordingOffset, samplesPerChunk);
-
-					// Advance the offset by chunk - overlap
 					this.recordingOffset += (samplesPerChunk - overlapSamples);
 				}
 
-				// Update progress roughly every ~1 second worth of samples to avoid UI locking
 				if (totalSamplesSoFar % this.sampleRate < inputData.length) {
 					this.updateModalProgress();
 				}
 			};
 
 			this.sourceNode.connect(this.processor);
-			this.processor.connect(this.audioContext.destination); // Required for script processor to work
+			this.processor.connect(this.audioContext.destination);
 
 			this.plugin.statusBarItem.setText('🎙 Dictating...');
 
@@ -231,13 +250,11 @@ export class TranscriptionLive {
 	updateModalProgress(isFinalizing: boolean = false) {
 		if (!this.session || !this.modal) return;
 
-		const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
-		const recordedSeconds = totalSamplesSoFar / this.sampleRate;
+		const recordedSeconds = this.totalRecordedSamplesCount / this.sampleRate;
 
 		const effectiveChunkAdvance = this.session.chunkSeconds - this.session.overlapSeconds;
 		let transcribedSeconds = this.session.chunksProcessed * effectiveChunkAdvance;
 
-		// Ensure transcribed doesn't exceed recorded, which can happen slightly due to last chunk boundaries
 		if (transcribedSeconds > recordedSeconds) {
 			transcribedSeconds = recordedSeconds;
 		}
@@ -253,30 +270,27 @@ export class TranscriptionLive {
 	async extractAndQueueChunk(startOffset: number, length: number) {
 		if (!this.session) return;
 
-		// Flatten recorded samples
-		const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
+		const totalSamplesSoFar = this.chunkBufferSamples.reduce((acc, val) => acc + val.length, 0);
 		const flatSamples = new Float32Array(totalSamplesSoFar);
 		let offset = 0;
-		for (const arr of this.recordedSamples) {
+		for (const arr of this.chunkBufferSamples) {
 			flatSamples.set(arr, offset);
 			offset += arr.length;
 		}
 
 		const chunkSamples = flatSamples.slice(startOffset, startOffset + length);
 
-		// Discard very old samples to prevent unbounded memory growth
-		// We keep up to the current startOffset
 		let discardSamples = startOffset;
-		while (this.recordedSamples.length > 0) {
-			const first = this.recordedSamples[0];
+		while (this.chunkBufferSamples.length > 0) {
+			const first = this.chunkBufferSamples[0];
 			if (first && discardSamples >= first.length) {
 				discardSamples -= first.length;
-				this.recordedSamples.shift();
+				this.chunkBufferSamples.shift();
 			} else {
 				break;
 			}
 		}
-		this.recordingOffset -= startOffset; // Adjust offset relative to the new start of recordedSamples
+		this.recordingOffset -= startOffset;
 
 		const isSilent = this.isSamplesSilent(chunkSamples, this.plugin.settings.liveSilenceGateDb || -40);
 		const chunkIndex = this.session.chunksProcessed + this.chunkQueue.length;
@@ -342,10 +356,9 @@ export class TranscriptionLive {
 			this.mediaStream = null;
 		}
 
-		// Extract any remaining audio as final chunk
-		if (this.recordedSamples.length > 0) {
-			const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
-			if (totalSamplesSoFar - this.recordingOffset > this.sampleRate) { // At least 1 second
+		if (this.chunkBufferSamples.length > 0) {
+			const totalSamplesSoFar = this.chunkBufferSamples.reduce((acc, val) => acc + val.length, 0);
+			if (totalSamplesSoFar - this.recordingOffset > this.sampleRate) {
 				await this.extractAndQueueChunk(this.recordingOffset, totalSamplesSoFar - this.recordingOffset);
 			}
 		}
@@ -354,7 +367,6 @@ export class TranscriptionLive {
 		this.modal?.log('Live session stopping... waiting for transcription to finish.');
 		this.plugin.statusBarItem.setText('⏳ Finalizing dictation...');
 
-		// Wait for the chunk queue to drain and processing to complete
 		while (this.chunkQueue.length > 0 || this.isProcessingChunk) {
 			this.updateModalProgress(true);
 			await new Promise(resolve => setTimeout(resolve, 500));
@@ -368,8 +380,7 @@ export class TranscriptionLive {
 		this.modal?.log('Live session stopped.');
 		this.plugin.statusBarItem.setText('');
 
-		// Prompt to keep or delete raw audio
-		if (rawAudioPath && this.recordedSamples.length > 0) {
+		if (rawAudioPath && this.totalRecordedSamplesCount > 0 && this.tempPcmPath && fs.existsSync(this.tempPcmPath)) {
 			const { Modal, Setting } = require('obsidian');
 			const promptModal = new Modal(this.app);
 			promptModal.titleEl.setText('Keep recording?');
@@ -381,29 +392,62 @@ export class TranscriptionLive {
 				}))
 				.addButton((btn: any) => btn.setButtonText('Keep').setCta().onClick(async () => {
 					promptModal.close();
-					const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
-					const flatSamples = new Float32Array(totalSamplesSoFar);
-					let offset = 0;
-					for (const arr of this.recordedSamples) {
-						flatSamples.set(arr, offset);
-						offset += arr.length;
+					try {
+						const pcmBuffer = fs.readFileSync(this.tempPcmPath!);
+						const samplesLength = pcmBuffer.length / 4;
+						const wavBuffer = new ArrayBuffer(44 + samplesLength * 2);
+						const view = new DataView(wavBuffer);
+						const writeString = (v: DataView, offset: number, string: string) => {
+							for (let i = 0; i < string.length; i++) {
+								v.setUint8(offset + i, string.charCodeAt(i));
+							}
+						};
+						writeString(view, 0, 'RIFF');
+						view.setUint32(4, 36 + samplesLength * 2, true);
+						writeString(view, 8, 'WAVE');
+						writeString(view, 12, 'fmt ');
+						view.setUint32(16, 16, true);
+						view.setUint16(20, 1, true); // PCM
+						view.setUint16(22, 1, true); // Mono
+						view.setUint32(24, this.sampleRate, true);
+						view.setUint32(28, this.sampleRate * 2, true);
+						view.setUint16(32, 2, true);
+						view.setUint16(34, 16, true);
+						writeString(view, 36, 'data');
+						view.setUint32(40, samplesLength * 2, true);
+						let offset = 44;
+						for (let i = 0; i < samplesLength; i++, offset += 2) {
+							const val = pcmBuffer.readFloatLE(i * 4);
+							const s = Math.max(-1, Math.min(1, val));
+							view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+						}
+
+						const adapter = this.app.vault.adapter as any;
+						const basePath = adapter.getBasePath();
+						const fullRawPath = path.join(basePath, rawAudioPath);
+
+						fs.writeFileSync(fullRawPath, Buffer.from(wavBuffer));
+
+						if (fs.existsSync(fullRawPath) && fs.statSync(fullRawPath).size > 44) {
+							new Notice(`Saved dictation audio to ${rawAudioPath}`);
+						} else {
+							new Notice(`Failed to save dictation audio properly: Output is empty.`);
+						}
+					} catch (e: any) {
+						new Notice(`Error saving raw audio: ${e.message}`);
+					} finally {
+						await this.cleanupSessionTempDir(sessionDir, [path.basename(rawAudioPath)]);
 					}
-					const wavBuffer = this.encodeWAV(flatSamples, this.sampleRate);
-					const adapter = this.app.vault.adapter as any;
-					const basePath = adapter.getBasePath();
-					const fullRawPath = path.join(basePath, rawAudioPath);
-					fs.writeFileSync(fullRawPath, Buffer.from(wavBuffer));
-					new Notice(`Saved dictation audio to ${rawAudioPath}`);
-					await this.cleanupSessionTempDir(sessionDir, [path.basename(rawAudioPath)]);
 				}));
 			promptModal.open();
 		} else {
 			await this.cleanupSessionTempDir(sessionDir);
 		}
 
-		// Reset state
 		this.session = null;
-		this.recordedSamples = [];
+		this.chunkBufferSamples = [];
+		this.totalRecordedSamplesCount = 0;
+		this.tempPcmPath = null;
 		this.chunkQueue = [];
 		this.isProcessingChunk = false;
 	}
@@ -412,8 +456,6 @@ export class TranscriptionLive {
 		const adapter = this.app.vault.adapter as any;
 		try {
 			if (await adapter.exists(sessionDir)) {
-				// Delete chunks and everything not in keepFiles
-				// This is a naive cleanup for a temp dir.
 				const list = await adapter.list(sessionDir);
 				for (const folder of list.folders) {
 					await adapter.rmdir(folder, true);
@@ -432,24 +474,6 @@ export class TranscriptionLive {
 		}
 	}
 
-	async writeSessionJson(session: LiveTranscriptionSession) {
-		const adapter = this.app.vault.adapter as any;
-		const basePath = adapter.getBasePath();
-		const sessionJsonPath = path.join(basePath, session.sessionDir, 'session.json');
-		const data = {
-			id: session.id,
-			startedAt: session.startedAt,
-			model: session.model,
-			language: session.language,
-			speakers: session.speakers,
-			chunkSeconds: session.chunkSeconds,
-			overlapSeconds: session.overlapSeconds,
-			failedChunks: this.failedChunks,
-			chunksProcessed: session.chunksProcessed
-		};
-		fs.writeFileSync(sessionJsonPath, JSON.stringify(data, null, 2));
-	}
-
 	async processNextChunk() {
 		if (this.chunkQueue.length === 0 || !this.session) {
 			this.isProcessingChunk = false;
@@ -460,7 +484,6 @@ export class TranscriptionLive {
 		const chunkPath = this.chunkQueue.shift()!;
 
 		const chunkIndex = this.session.chunksProcessed;
-		// Absolute time offset calculation
 		const chunkStartTime = chunkIndex * (this.session.chunkSeconds - this.session.overlapSeconds);
 
 		try {
@@ -468,14 +491,12 @@ export class TranscriptionLive {
 			const result: any = await this.processChunk(chunkPath, chunkStartTime);
 
 			if (result && result.segments && result.segments.length > 0) {
-				// Normalize timestamps relative to session start
 				const normalizedSegments = result.segments.map((s: any) => ({
 					...s,
 					start: s.start + chunkStartTime,
 					end: s.end + chunkStartTime
 				}));
 
-				// Deduplicate
 				const newSegments = this.plugin.liveSessionManager.deduplicateSegments(
 					this.session.transcriptSegments,
 					normalizedSegments
@@ -484,12 +505,7 @@ export class TranscriptionLive {
 				if (newSegments.length > 0) {
 					for (const seg of newSegments) {
 						this.session.transcriptSegments.push(seg);
-
-						// We no longer preview in the modal or append to files directly here.
-						// Instead, we will insert it directly at the cursor position.
 						this.insertLiveChunkAtCursor(seg.text);
-
-						// Update the modal preview with the latest text
 						this.modal?.setPreviewText(seg.text);
 					}
 				}
@@ -501,7 +517,6 @@ export class TranscriptionLive {
 			if (this.session) {
 				this.session.chunksProcessed++;
 				this.updateModalProgress();
-				// If not stopping, process next
 				if (this.session.status !== 'idle') {
 					this.processNextChunk();
 				} else {
@@ -551,7 +566,6 @@ export class TranscriptionLive {
 
 		editor.replaceRange(insertText, cursor);
 
-		// Move cursor to the end of the inserted text
 		const lines = insertText.split('\n');
 		const lastLine = lines[lines.length - 1] || '';
 		if (lines.length === 1) {
@@ -567,84 +581,31 @@ export class TranscriptionLive {
 	async processChunk(chunkPath: string, chunkStart: number): Promise<unknown> {
 		if (!this.session) throw new Error("No session");
 
-		return new Promise((resolve, reject) => {
-			const adapter: any = this.app.vault.adapter;
-			const vaultPath = adapter && adapter.getBasePath ? adapter.getBasePath() : '';
-			const pluginDir = path.join(vaultPath, this.app.vault.configDir, 'plugins', 'local-transcriber');
-			const transcribeScript = path.join(pluginDir, 'local_transcriber', 'transcribe_live.py');
-			const modelsDir = this.plugin.environment.getModelsDir();
+		const fullModelId = this.session.model;
+		const backendStr = fullModelId.split('::')[0];
+		const modelId = fullModelId.split('::').slice(1).join('::');
 
-			const pyPath = this.plugin.environment.getPythonExecutable();
+		const modelsDir = this.plugin.pythonEnv.getModelsDir();
 
-			const args = [
-				transcribeScript,
-				'--input', chunkPath,
-				'--model', this.session?.model || '',
-				'--language', this.session?.language || '',
-				'--models-dir', modelsDir,
-				'--chunk-start', chunkStart.toString(),
-				'--session-id', this.session?.id || '',
-				'--output-format', 'jsonl',
-				'--no-diarization', // Diarization disabled for dictation
-				'--input-is-normalized-wav'
-			];
+		const options = {
+			chunkPath,
+			modelId,
+			language: this.session.language,
+			modelsDir,
+			chunkStart,
+			sessionId: this.session.id
+		};
 
-			const child = spawn(pyPath, args);
+		const onEvent = (msg: any) => {};
 
-			let finalJson = '';
-			let rawStdout = '';
-			let stderrOutput = '';
-			let segments: any[] = [];
+		if (backendStr === 'python-whisper') {
+			const backend = new PythonWhisperLiveBackend(this.plugin);
+			return backend.transcribeChunk(options, onEvent);
+		} else if (backendStr === 'ollama') {
+			const backend = new OllamaLiveBackend(this.plugin);
+			return backend.transcribeChunk(options, onEvent);
+		}
 
-			if (child.stdout) {
-				child.stdout.on('data', (chunk) => {
-					const text = chunk.toString();
-					rawStdout += text;
-					const lines = text.split('\n').filter((l: string) => l.trim());
-					for (const line of lines) {
-						if (line.startsWith('{')) {
-							try {
-								const msg = JSON.parse(line);
-								if (msg.type === 'segment') {
-									segments.push(msg);
-								} else if (msg.type === 'result') {
-									finalJson = line;
-								}
-							} catch {}
-						}
-					}
-				});
-			}
-
-			if (child.stderr) {
-				child.stderr.on('data', (data) => {
-					stderrOutput += data.toString();
-				});
-			}
-
-			child.on('close', (code) => {
-				if (code !== 0) {
-					reject(new Error(`Process failed with code ${code}.\n${stderrOutput || 'No stderr.'}`));
-					return;
-				}
-
-				if (finalJson) {
-					try {
-						const parsed = JSON.parse(finalJson);
-						if (parsed && parsed.error) {
-							reject(new Error(parsed.error));
-							return;
-						}
-						// Use collected segments instead of batch parsed
-						if (parsed) {
-							resolve({ ...parsed, segments });
-							return;
-						}
-					} catch {}
-				}
-
-				resolve({ segments });
-			});
-		});
+		throw new Error("Unknown backend");
 	}
 }

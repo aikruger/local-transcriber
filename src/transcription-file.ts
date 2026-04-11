@@ -1,8 +1,9 @@
 import { App, Notice, TFile } from 'obsidian';
 import * as path from 'path';
-import { spawn } from 'child_process';
 import LocalTranscriberPlugin from './main';
 import { TranscribeModal } from './ui/transcribe-modal';
+import { PythonWhisperFileBackend } from './transcription/file/python-whisper';
+import { OllamaFileBackend } from './transcription/file/ollama';
 
 export class TranscriptionFile {
 	plugin: LocalTranscriberPlugin;
@@ -32,15 +33,33 @@ export class TranscriptionFile {
 			this.plugin.statusBarItem.setText('🔊 Transcribing...');
 			try {
 				modal.setStage('Checking environment');
-				await this.plugin.environment.setupWhisperEnvironment(modal);
+
+				const modelDesc = this.plugin.modelRegistry.getModel(
+					(modal.selectedModel ?? this.plugin.settings.modelSize).split('::')[0] as any,
+					(modal.selectedModel ?? this.plugin.settings.modelSize).split('::').slice(1).join('::')
+				);
+
+				if (!modelDesc) throw new Error("Selected model not found.");
+
+				if (modelDesc.backend === 'python-whisper') {
+					await this.plugin.pythonEnv.setupWhisperEnvironment(modal);
+				} else if (modelDesc.backend === 'ollama') {
+					if (!await this.plugin.ollamaEnv.isOllamaRunning()) {
+						throw new Error("Ollama is not running. Please start Ollama.");
+					}
+				}
 
 				modal.setStage('Preparing audio');
 				const filePath = this.getAbsolutePath(file);
 
 				modal.setStage('Transcribing');
-				const result: any = await this.processFile(filePath, modal, modal.selectedModel, modal.selectedSpeakers);
+				const result: any = await this.processFile(filePath, modal, modal.selectedModel ?? this.plugin.settings.modelSize, modal.selectedSpeakers ?? this.plugin.settings.speakers);
 
-				modal.setStage('Saving outputs');
+
+					if (modal.selectedSpeakers !== '0' && result.segments && !result.segments.some((s: any) => !!s.speaker)) {
+						new Notice('Diarization did not produce speaker labels; check Python/Pyannote setup.');
+					}
+					modal.setStage('Saving outputs');
 				await this.plugin.outputWriters.saveOutputs(file.basename, result.segments, modal.selectedInterval, modal.selectedPauseGap);
 
 				modal.setStage('Done');
@@ -67,6 +86,19 @@ export class TranscriptionFile {
 			return;
 		}
 
+		const fs = require('fs');
+		if (!fs.existsSync(filePath)) {
+			new Notice(`File not found: ${filePath}`);
+			return;
+		}
+
+		const ext = filePath.split('.').pop()?.toLowerCase();
+		const allowedExts = ['mp3', 'wav', 'm4a', 'ogg', 'mp4', 'mkv', 'avi', 'mov', 'webm'];
+		if (!ext || !allowedExts.includes(ext)) {
+			new Notice(`Unsupported file extension: ${ext}`);
+			return;
+		}
+
 		const modal = new TranscribeModal(this.app, this.plugin);
 		modal.open();
 
@@ -75,16 +107,34 @@ export class TranscriptionFile {
 			this.plugin.statusBarItem.setText('🔊 Transcribing...');
 			try {
 				modal.setStage('Checking environment');
-				await this.plugin.environment.setupWhisperEnvironment(modal);
+
+				const modelDesc = this.plugin.modelRegistry.getModel(
+					(modal.selectedModel ?? this.plugin.settings.modelSize).split('::')[0] as any,
+					(modal.selectedModel ?? this.plugin.settings.modelSize).split('::').slice(1).join('::')
+				);
+
+				if (!modelDesc) throw new Error("Selected model not found.");
+
+				if (modelDesc.backend === 'python-whisper') {
+					await this.plugin.pythonEnv.setupWhisperEnvironment(modal);
+				} else if (modelDesc.backend === 'ollama') {
+					if (!await this.plugin.ollamaEnv.isOllamaRunning()) {
+						throw new Error("Ollama is not running. Please start Ollama.");
+					}
+				}
 
 				modal.setStage('Preparing audio');
 				const lastDotIndex = fileName.lastIndexOf('.');
 				const stem = lastDotIndex !== -1 ? fileName.substring(0, lastDotIndex) : fileName;
 
 				modal.setStage('Transcribing');
-				const result: any = await this.processFile(filePath, modal, modal.selectedModel, modal.selectedSpeakers);
+				const result: any = await this.processFile(filePath, modal, modal.selectedModel ?? this.plugin.settings.modelSize, modal.selectedSpeakers ?? this.plugin.settings.speakers);
 
-				modal.setStage('Saving outputs');
+
+					if (modal.selectedSpeakers !== '0' && result.segments && !result.segments.some((s: any) => !!s.speaker)) {
+						new Notice('Diarization did not produce speaker labels; check Python/Pyannote setup.');
+					}
+					modal.setStage('Saving outputs');
 				await this.plugin.outputWriters.saveOutputs(stem, result.segments, modal.selectedInterval, modal.selectedPauseGap);
 
 				modal.setStage('Done');
@@ -111,101 +161,48 @@ export class TranscriptionFile {
 		modelOverride?: string,
 		speakersOverride?: string
 	): Promise<unknown> {
-		const modelToUse = modelOverride ?? this.plugin.settings.modelSize;
+		const fullModelId = modelOverride ?? this.plugin.settings.modelSize;
 		const speakersToUse = speakersOverride ?? this.plugin.settings.speakers;
 
-		return new Promise((resolve, reject) => {
-			const adapter: any = this.app.vault.adapter;
-			const vaultPath = adapter && adapter.getBasePath ? adapter.getBasePath() : '';
-			const pluginDir = path.join(vaultPath, this.app.vault.configDir, 'plugins', 'local-transcriber');
-			const transcribeScript = path.join(pluginDir, 'local_transcriber', 'transcribe.py');
-			const modelsDir = this.plugin.environment.getModelsDir();
+		const backendStr = fullModelId.split('::')[0];
+		const modelId = fullModelId.split('::').slice(1).join('::');
 
-			const pyPath = this.plugin.environment.getPythonExecutable();
-			const child = spawn(pyPath, [
-				transcribeScript,
-				'--input', inputPath,
-				'--model', modelToUse,
-				'--language', this.plugin.settings.language,
-				'--speakers', speakersToUse,
-				'--models-dir', modelsDir
-			]);
+		const modelsDir = this.plugin.pythonEnv.getModelsDir();
 
-			let finalJson = '';
-			let totalDuration = 0;
-			let rawStdout = '';
+		let totalDuration = 0;
 
-			child.stdout.on('data', (chunk) => {
-				const text = chunk.toString();
-				rawStdout += text;
-				const lines = text.split('\n').filter((l: string) => l.trim());
-				for (const line of lines) {
-					if (line.startsWith('{')) {
-						try {
-							const msg = JSON.parse(line);
-							if (msg.type === 'segment') {
-								const speaker = msg.speaker
-									? `Speaker ${parseInt(msg.speaker.replace('SPEAKER_', '')) + 1}: `
-									: '';
-								const timestamp = this.plugin.outputWriters.formatTimeTxt(msg.start);
-								modal.appendPreview(`${timestamp} ${speaker}${msg.text}`);
-								if (totalDuration > 0) {
-									const pct = 40 + ((msg.end / totalDuration) * 43);
-									modal.setProgress(pct);
-								}
-							} else if (msg.type === 'meta') {
-								totalDuration = msg.duration || 0;
-							} else if (msg.type === 'result') {
-								finalJson = line;
-							}
-						} catch {
-						}
-					}
+		const options = {
+			inputPath,
+			modelId,
+			language: this.plugin.settings.fileLanguage,
+			speakers: speakersToUse,
+			modelsDir
+		};
+
+		const onEvent = (msg: any) => {
+			if (msg.type === 'segment') {
+				const speaker = msg.speaker
+					? `Speaker ${parseInt(msg.speaker.replace('SPEAKER_', '')) + 1}: `
+					: '';
+				const timestamp = this.plugin.outputWriters.formatTimeTxt(msg.start);
+				modal.appendPreview(`${timestamp} ${speaker}${msg.text}`);
+				if (totalDuration > 0) {
+					const pct = 40 + ((msg.end / totalDuration) * 43);
+					modal.setProgress(pct);
 				}
-			});
+			} else if (msg.type === 'meta') {
+				totalDuration = msg.duration || 0;
+			}
+		};
 
-			let stderrOutput = '';
-			child.stderr.on('data', (data) => {
-				stderrOutput += data.toString();
-			});
+		if (backendStr === 'python-whisper') {
+			const backend = new PythonWhisperFileBackend(this.plugin);
+			return backend.transcribeFile(options, onEvent);
+		} else if (backendStr === 'ollama') {
+			const backend = new OllamaFileBackend(this.plugin);
+			return backend.transcribeFile(options, onEvent);
+		}
 
-			child.on('close', (code) => {
-				if (code !== 0) {
-					reject(new Error(`Process failed with code ${code}.\n${stderrOutput || 'No stderr.'}`));
-					return;
-				}
-
-				if (finalJson) {
-					try {
-						const parsed = JSON.parse(finalJson);
-						if (parsed.error) {
-							reject(new Error(parsed.error));
-							return;
-						}
-						resolve(parsed);
-						return;
-					} catch {
-					}
-				}
-
-				const allLines = rawStdout.split('\n').filter(l => l.trim().startsWith('{'));
-				for (let i = allLines.length - 1; i >= 0; i--) {
-					try {
-						const candidate = JSON.parse(allLines[i]!);
-						if (Array.isArray(candidate.segments)) {
-							resolve(candidate);
-							return;
-						}
-					} catch {
-					}
-				}
-
-				reject(new Error(
-					`No valid JSON result from Python backend.\n` +
-					`stdout was:\n${rawStdout.slice(0, 500)}\n` +
-					`stderr was:\n${stderrOutput.slice(0, 500)}`
-				));
-			});
-		});
+		throw new Error("Unknown backend");
 	}
 }
