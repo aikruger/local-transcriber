@@ -22,7 +22,9 @@ export class TranscriptionLive {
 	private mediaStream: MediaStream | null = null;
 	private processor: ScriptProcessorNode | null = null;
 	private sourceNode: MediaStreamAudioSourceNode | null = null;
-	private recordedSamples: Float32Array[] = [];
+	private chunkBufferSamples: Float32Array[] = [];
+	private tempPcmPath: string | null = null;
+	private totalRecordedSamplesCount: number = 0;
 	private recordingOffset: number = 0;
 	private sampleRate: number = 16000;
 
@@ -192,7 +194,11 @@ export class TranscriptionLive {
 			this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
 
 			this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
-			this.recordedSamples = [];
+			this.chunkBufferSamples = [];
+			this.totalRecordedSamplesCount = 0;
+			const adapter = this.app.vault.adapter as any;
+			const basePath = adapter.getBasePath();
+			this.tempPcmPath = path.join(basePath, this.session.sessionDir, 'raw.pcm');
 			this.recordingOffset = 0;
 
 			const samplesPerChunk = this.session.chunkSeconds * this.sampleRate;
@@ -204,9 +210,19 @@ export class TranscriptionLive {
 				const inputData = e.inputBuffer.getChannelData(0);
 				const dataCopy = new Float32Array(inputData.length);
 				dataCopy.set(inputData);
-				this.recordedSamples.push(dataCopy);
+				this.chunkBufferSamples.push(dataCopy);
+				this.totalRecordedSamplesCount += dataCopy.length;
 
-				const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
+				// Append to temp PCM file directly
+				if (this.tempPcmPath) {
+					const buf = Buffer.alloc(dataCopy.length * 4);
+					for (let i = 0; i < dataCopy.length; i++) {
+						buf.writeFloatLE(dataCopy[i] || 0, i * 4);
+					}
+					fs.appendFileSync(this.tempPcmPath, buf);
+				}
+
+				const totalSamplesSoFar = this.chunkBufferSamples.reduce((acc, val) => acc + val.length, 0);
 
 				if (totalSamplesSoFar - this.recordingOffset >= samplesPerChunk) {
 					this.extractAndQueueChunk(this.recordingOffset, samplesPerChunk);
@@ -232,8 +248,7 @@ export class TranscriptionLive {
 	updateModalProgress(isFinalizing: boolean = false) {
 		if (!this.session || !this.modal) return;
 
-		const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
-		const recordedSeconds = totalSamplesSoFar / this.sampleRate;
+		const recordedSeconds = this.totalRecordedSamplesCount / this.sampleRate;
 
 		const effectiveChunkAdvance = this.session.chunkSeconds - this.session.overlapSeconds;
 		let transcribedSeconds = this.session.chunksProcessed * effectiveChunkAdvance;
@@ -253,10 +268,10 @@ export class TranscriptionLive {
 	async extractAndQueueChunk(startOffset: number, length: number) {
 		if (!this.session) return;
 
-		const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
+		const totalSamplesSoFar = this.chunkBufferSamples.reduce((acc, val) => acc + val.length, 0);
 		const flatSamples = new Float32Array(totalSamplesSoFar);
 		let offset = 0;
-		for (const arr of this.recordedSamples) {
+		for (const arr of this.chunkBufferSamples) {
 			flatSamples.set(arr, offset);
 			offset += arr.length;
 		}
@@ -264,11 +279,11 @@ export class TranscriptionLive {
 		const chunkSamples = flatSamples.slice(startOffset, startOffset + length);
 
 		let discardSamples = startOffset;
-		while (this.recordedSamples.length > 0) {
-			const first = this.recordedSamples[0];
+		while (this.chunkBufferSamples.length > 0) {
+			const first = this.chunkBufferSamples[0];
 			if (first && discardSamples >= first.length) {
 				discardSamples -= first.length;
-				this.recordedSamples.shift();
+				this.chunkBufferSamples.shift();
 			} else {
 				break;
 			}
@@ -339,8 +354,8 @@ export class TranscriptionLive {
 			this.mediaStream = null;
 		}
 
-		if (this.recordedSamples.length > 0) {
-			const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
+		if (this.chunkBufferSamples.length > 0) {
+			const totalSamplesSoFar = this.chunkBufferSamples.reduce((acc, val) => acc + val.length, 0);
 			if (totalSamplesSoFar - this.recordingOffset > this.sampleRate) {
 				await this.extractAndQueueChunk(this.recordingOffset, totalSamplesSoFar - this.recordingOffset);
 			}
@@ -363,7 +378,7 @@ export class TranscriptionLive {
 		this.modal?.log('Live session stopped.');
 		this.plugin.statusBarItem.setText('');
 
-		if (rawAudioPath && this.recordedSamples.length > 0) {
+		if (rawAudioPath && this.totalRecordedSamplesCount > 0 && this.tempPcmPath && fs.existsSync(this.tempPcmPath)) {
 			const { Modal, Setting } = require('obsidian');
 			const promptModal = new Modal(this.app);
 			promptModal.titleEl.setText('Keep recording?');
@@ -375,20 +390,52 @@ export class TranscriptionLive {
 				}))
 				.addButton((btn: any) => btn.setButtonText('Keep').setCta().onClick(async () => {
 					promptModal.close();
-					const totalSamplesSoFar = this.recordedSamples.reduce((acc, val) => acc + val.length, 0);
-					const flatSamples = new Float32Array(totalSamplesSoFar);
-					let offset = 0;
-					for (const arr of this.recordedSamples) {
-						flatSamples.set(arr, offset);
-						offset += arr.length;
+					try {
+						const pcmBuffer = fs.readFileSync(this.tempPcmPath!);
+						const samplesLength = pcmBuffer.length / 4;
+						const wavBuffer = new ArrayBuffer(44 + samplesLength * 2);
+						const view = new DataView(wavBuffer);
+						const writeString = (v: DataView, offset: number, string: string) => {
+							for (let i = 0; i < string.length; i++) {
+								v.setUint8(offset + i, string.charCodeAt(i));
+							}
+						};
+						writeString(view, 0, 'RIFF');
+						view.setUint32(4, 36 + samplesLength * 2, true);
+						writeString(view, 8, 'WAVE');
+						writeString(view, 12, 'fmt ');
+						view.setUint32(16, 16, true);
+						view.setUint16(20, 1, true); // PCM
+						view.setUint16(22, 1, true); // Mono
+						view.setUint32(24, this.sampleRate, true);
+						view.setUint32(28, this.sampleRate * 2, true);
+						view.setUint16(32, 2, true);
+						view.setUint16(34, 16, true);
+						writeString(view, 36, 'data');
+						view.setUint32(40, samplesLength * 2, true);
+						let offset = 44;
+						for (let i = 0; i < samplesLength; i++, offset += 2) {
+							const val = pcmBuffer.readFloatLE(i * 4);
+							const s = Math.max(-1, Math.min(1, val));
+							view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+						}
+
+						const adapter = this.app.vault.adapter as any;
+						const basePath = adapter.getBasePath();
+						const fullRawPath = path.join(basePath, rawAudioPath);
+
+						fs.writeFileSync(fullRawPath, Buffer.from(wavBuffer));
+
+						if (fs.existsSync(fullRawPath) && fs.statSync(fullRawPath).size > 44) {
+							new Notice(`Saved dictation audio to ${rawAudioPath}`);
+						} else {
+							new Notice(`Failed to save dictation audio properly: Output is empty.`);
+						}
+					} catch (e: any) {
+						new Notice(`Error saving raw audio: ${e.message}`);
+					} finally {
+						await this.cleanupSessionTempDir(sessionDir, [path.basename(rawAudioPath)]);
 					}
-					const wavBuffer = this.encodeWAV(flatSamples, this.sampleRate);
-					const adapter = this.app.vault.adapter as any;
-					const basePath = adapter.getBasePath();
-					const fullRawPath = path.join(basePath, rawAudioPath);
-					fs.writeFileSync(fullRawPath, Buffer.from(wavBuffer));
-					new Notice(`Saved dictation audio to ${rawAudioPath}`);
-					await this.cleanupSessionTempDir(sessionDir, [path.basename(rawAudioPath)]);
 				}));
 			promptModal.open();
 		} else {
@@ -396,7 +443,9 @@ export class TranscriptionLive {
 		}
 
 		this.session = null;
-		this.recordedSamples = [];
+		this.chunkBufferSamples = [];
+		this.totalRecordedSamplesCount = 0;
+		this.tempPcmPath = null;
 		this.chunkQueue = [];
 		this.isProcessingChunk = false;
 	}
