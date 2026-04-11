@@ -35,8 +35,8 @@ export class TranscriptionFile {
 				modal.setStage('Checking environment');
 
 				const modelDesc = this.plugin.modelRegistry.getModel(
-					modal.selectedModel.split('::')[0] as any,
-					modal.selectedModel.split('::').slice(1).join('::')
+					(modal.selectedModel ?? this.plugin.settings.modelSize).split('::')[0] as any,
+					(modal.selectedModel ?? this.plugin.settings.modelSize).split('::').slice(1).join('::')
 				);
 
 				if (!modelDesc) throw new Error("Selected model not found.");
@@ -53,7 +53,7 @@ export class TranscriptionFile {
 				const filePath = this.getAbsolutePath(file);
 
 				modal.setStage('Transcribing');
-				const result: any = await this.processFile(filePath, modal, modal.selectedModel, modal.selectedSpeakers);
+				const result: any = await this.processFile(filePath, modal, modal.selectedModel ?? this.plugin.settings.modelSize, modal.selectedSpeakers ?? this.plugin.settings.speakers);
 
 				modal.setStage('Saving outputs');
 				await this.plugin.outputWriters.saveOutputs(file.basename, result.segments, modal.selectedInterval, modal.selectedPauseGap);
@@ -82,6 +82,19 @@ export class TranscriptionFile {
 			return;
 		}
 
+		const fs = require('fs');
+		if (!fs.existsSync(filePath)) {
+			new Notice(`File not found: ${filePath}`);
+			return;
+		}
+
+		const ext = filePath.split('.').pop()?.toLowerCase();
+		const allowedExts = ['mp3', 'wav', 'm4a', 'ogg', 'mp4', 'mkv', 'avi', 'mov', 'webm'];
+		if (!ext || !allowedExts.includes(ext)) {
+			new Notice(`Unsupported file extension: ${ext}`);
+			return;
+		}
+
 		const modal = new TranscribeModal(this.app, this.plugin);
 		modal.open();
 
@@ -92,8 +105,8 @@ export class TranscriptionFile {
 				modal.setStage('Checking environment');
 
 				const modelDesc = this.plugin.modelRegistry.getModel(
-					modal.selectedModel.split('::')[0] as any,
-					modal.selectedModel.split('::').slice(1).join('::')
+					(modal.selectedModel ?? this.plugin.settings.modelSize).split('::')[0] as any,
+					(modal.selectedModel ?? this.plugin.settings.modelSize).split('::').slice(1).join('::')
 				);
 
 				if (!modelDesc) throw new Error("Selected model not found.");
@@ -111,7 +124,7 @@ export class TranscriptionFile {
 				const stem = lastDotIndex !== -1 ? fileName.substring(0, lastDotIndex) : fileName;
 
 				modal.setStage('Transcribing');
-				const result: any = await this.processFile(filePath, modal, modal.selectedModel, modal.selectedSpeakers);
+				const result: any = await this.processFile(filePath, modal, modal.selectedModel ?? this.plugin.settings.modelSize, modal.selectedSpeakers ?? this.plugin.settings.speakers);
 
 				modal.setStage('Saving outputs');
 				await this.plugin.outputWriters.saveOutputs(stem, result.segments, modal.selectedInterval, modal.selectedPauseGap);

@@ -84,40 +84,19 @@ export default class LocalTranscriberPlugin extends Plugin {
 			id: 'transcribe-external-file',
 			name: 'Transcribe external file',
 			callback: async () => {
-				let electron;
-				try {
-					electron = require('electron');
-				} catch { }
+				const { remote } = require('electron');
+				const result = await remote.dialog.showOpenDialog({
+					properties: ['openFile'],
+					filters: [
+						{ name: 'Media', extensions: ['mp3', 'wav', 'm4a', 'ogg', 'mp4', 'mkv', 'avi', 'mov', 'webm'] }
+					]
+				});
 
-				if (electron && electron.remote && electron.remote.dialog) {
-					const result = await electron.remote.dialog.showOpenDialog({
-						properties: ['openFile'],
-						filters: [{ name: 'Media', extensions: ['mp3', 'wav', 'm4a', 'ogg', 'mp4', 'mkv', 'avi', 'mov', 'webm'] }]
-					});
-					if (result.canceled || !result.filePaths.length) return;
-					const filePath = result.filePaths[0];
-					const fileName = require('path').basename(filePath);
-					await this.transcriptionFile.handleTranscribeExternal(filePath, fileName);
-				} else {
-					const { Modal, Setting } = require('obsidian');
-					class PathModal extends Modal {
-						filepath: string = '';
-						constructor(app: any) { super(app); }
-						onOpen() {
-							const { contentEl } = this;
-							this.titleEl.setText('Enter File Path');
-							new Setting(contentEl).setName('File Path').setDesc('Enter absolute path to media file').addText((text: any) => text.onChange((value: string) => this.filepath = value));
-							new Setting(contentEl).addButton((btn: any) => btn.setButtonText('Transcribe').setCta().onClick(() => {
-								this.close();
-								const fileName = require('path').basename(this.filepath);
-								// @ts-ignore
-								this.app.plugins.getPlugin('local-transcriber').transcriptionFile.handleTranscribeExternal(this.filepath, fileName);
-							}));
-						}
-						onClose() { this.contentEl.empty(); }
-					}
-					new PathModal(this.app).open();
-				}
+				if (result.canceled || !result.filePaths.length) return;
+
+				const filePath = result.filePaths[0];
+				const fileName = require('path').basename(filePath);
+				await this.transcriptionFile.handleTranscribeExternal(filePath, fileName);
 			}
 		});
 
