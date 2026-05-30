@@ -32,7 +32,10 @@ export interface LocalTranscriberSettings {
 	liveSilenceGateDb: number;
 	liveModelSize: string; // The selected Live model ID
 
-	backendFilter: "all" | "python-whisper" | "ollama";
+	liveOllamaCleanupModel: string;   // empty string = disabled, model id = enabled
+	liveOllamaCleanupEnabled: boolean;
+
+	backendFilter: "all" | "python-whisper" | "ollama" | "faster-whisper";
 }
 
 export const DEFAULT_SETTINGS: LocalTranscriberSettings = {
@@ -40,9 +43,11 @@ export const DEFAULT_SETTINGS: LocalTranscriberSettings = {
 	modelsReady: false,
 	pythonPath: null,
 	installOnWindows: true,
-	modelSize: "python-whisper::base.en",
+	modelSize: "python-whisper::base",
 	modelsFolder: "",
-	availableModels: "tiny.en\nbase.en\nsmall.en",
+	availableModels: "tiny\nbase\nsmall",
+	liveOllamaCleanupModel: "",
+	liveOllamaCleanupEnabled: false,
 	fileLanguage: "en",
 	speakers: "0",
 	outputFormat: "SRT",
@@ -60,7 +65,7 @@ export const DEFAULT_SETTINGS: LocalTranscriberSettings = {
 	liveDiarizationMode: "finalize",
 	liveMicDeviceId: "default",
 	liveSilenceGateDb: -40,
-	liveModelSize: "python-whisper::tiny.en",
+	liveModelSize: "python-whisper::tiny",
 	liveLanguage: "en",
 
 	backendFilter: "all"
@@ -207,10 +212,11 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 			.setDesc('Filter model list by backend.')
 			.addDropdown(dropdown => dropdown
 				.addOption('all', 'All')
-				.addOption('python-whisper', 'Python Whisper')
+				.addOption('python-whisper', 'Python Whisper (Legacy)')
+				.addOption('faster-whisper', 'Faster Whisper')
 				.addOption('ollama', 'Ollama')
 				.setValue(this.plugin.settings.backendFilter)
-				.onChange(async (value: "all" | "python-whisper" | "ollama") => {
+				.onChange(async (value: "all" | "python-whisper" | "ollama" | "faster-whisper") => {
 					this.plugin.settings.backendFilter = value;
 					await this.plugin.saveSettings();
 					this.display();
@@ -231,7 +237,7 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 			.setName('Custom Python Whisper Models')
 			.setDesc('One model name per line. These will appear in the model selector dropdown when transcribing. Model names must match Whisper model identifiers.')
 			.addTextArea(text => text
-				.setPlaceholder('tiny.en\nbase.en\nsmall.en')
+				.setPlaceholder('tiny\nbase\nsmall')
 				.setValue(this.plugin.settings.availableModels)
 				.onChange(async (value) => {
 					this.plugin.settings.availableModels = value;
@@ -291,6 +297,36 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				});
 			});
+
+		new Setting(containerEl)
+			.setName('Ollama Stage 2 Cleanup')
+			.setDesc('After transcribing, send text to a local Ollama model to clean up punctuation, remove filler words, and fix mis-transcriptions. Requires Ollama running locally. Falls back to raw transcript if unavailable.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.liveOllamaCleanupEnabled)
+				.onChange(async (value) => {
+					this.plugin.settings.liveOllamaCleanupEnabled = value;
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+
+		if (this.plugin.settings.liveOllamaCleanupEnabled) {
+			const ollamaModels = this.plugin.modelRegistry.getAllModels()
+				.filter(m => m.backend === 'ollama');
+
+			new Setting(containerEl)
+				.setName('Ollama Cleanup Model')
+				.setDesc('Select which local Ollama model to use for text cleanup. Recommended: llama3.2 or mistral for speed, llama3.1:8b for quality.')
+				.addDropdown(dropdown => {
+					dropdown.addOption('', '— select model —');
+					ollamaModels.forEach(m => dropdown.addOption(m.id, m.label));
+					dropdown.setValue(this.plugin.settings.liveOllamaCleanupModel);
+					dropdown.onChange(async (value) => {
+						this.plugin.settings.liveOllamaCleanupModel = value;
+						// also write to liveOllamaCleanupModel on the python-whisper backend side
+						await this.plugin.saveSettings();
+					});
+				});
+		}
 
 		new Setting(containerEl)
 			.setName('Default Live Language')

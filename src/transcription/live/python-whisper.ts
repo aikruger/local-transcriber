@@ -3,6 +3,7 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import { LiveTranscriptionBackend, LiveTranscriptionOptions, TranscriptionEvent, Segment } from '../events';
 import LocalTranscriberPlugin from '../../main';
+import { OllamaLiveBackend } from './ollama';
 
 export class PythonWhisperLiveBackend implements LiveTranscriptionBackend {
     constructor(private plugin: LocalTranscriberPlugin) {}
@@ -64,7 +65,7 @@ export class PythonWhisperLiveBackend implements LiveTranscriptionBackend {
 				});
 			}
 
-			child.on('close', (code) => {
+			child.on('close', async (code) => {
 				if (code !== 0) {
 					reject(new Error(`Process failed with code ${code}.\n${stderrOutput || 'No stderr.'}`));
 					return;
@@ -80,6 +81,19 @@ export class PythonWhisperLiveBackend implements LiveTranscriptionBackend {
 					} catch {}
 				}
 
+				// Stage 2: optional Ollama cleanup pass
+				const cleanupModel = (this.plugin.settings as any).liveOllamaCleanupModel ?? '';
+				if (cleanupModel && cleanupModel !== 'off' && segments.length > 0) {
+					try {
+						const ollamaBackend = new OllamaLiveBackend(this.plugin);
+						const cleanupOptions = { ...options, modelId: cleanupModel, rawSegments: segments };
+						const cleaned = await ollamaBackend.transcribeChunk(cleanupOptions as any, onEvent);
+						resolve({ segments: cleaned.segments });
+						return;
+					} catch {
+						// Ollama cleanup failed — fall through to raw segments
+					}
+				}
 				resolve({ segments });
 			});
         });

@@ -4,7 +4,7 @@ import { OllamaEnvironment } from '../environment/ollama';
 export class ModelDiscovery {
 
     static BUILTIN_WHISPER_MODELS = [
-        "tiny.en", "tiny", "base.en", "base", "small.en", "small", "medium.en", "medium", "large-v1", "large-v2", "large-v3"
+        "tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3"
     ];
 
     constructor(
