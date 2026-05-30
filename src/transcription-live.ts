@@ -4,6 +4,7 @@ import { LiveTranscribeModal } from './ui/live-modal';
 import { LiveTranscriptionSession, LiveSegment } from './live-session';
 import { PythonWhisperLiveBackend } from './transcription/live/python-whisper';
 import { OllamaLiveBackend } from './transcription/live/ollama';
+import { WhisperServerBackend } from './transcription/live/whisper-server-backend';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -12,6 +13,7 @@ export class TranscriptionLive {
 	app: App;
 
 	private session: LiveTranscriptionSession | null = null;
+	private whisperServer: WhisperServerBackend | null = null;
 	private isProcessingChunk: boolean = false;
 	private chunkQueue: string[] = [];
 
@@ -185,6 +187,25 @@ export class TranscriptionLive {
 
 		this.modal?.setRecordingState('recording');
 		this.modal?.log('Starting live transcription session...');
+
+		// ── NEW: start persistent server for faster-whisper backend ──────────────
+		const fullModelId = this.session!.model;
+		const backendStr  = fullModelId.split('::')[0];
+		const modelId     = fullModelId.split('::').slice(1).join('::');
+
+		if (backendStr === 'faster-whisper') {
+			this.modal?.log(`Loading model "${modelId}" — this takes 10–25 s on first use...`);
+			try {
+				this.whisperServer = new WhisperServerBackend(this.plugin);
+				await this.whisperServer.start(modelId, this.session!.language);
+				this.modal?.log('✅ Model ready. Recording will start now.');
+			} catch (err: any) {
+				this.modal?.log(`❌ Failed to start Whisper server: ${err.message}`);
+				this.session = null;
+				return;
+			}
+		}
+		// ─────────────────────────────────────────────────────────────────────────
 
 		await this.plugin.liveSessionManager.initSessionNote(this.session);
 
@@ -444,6 +465,12 @@ export class TranscriptionLive {
 			await this.cleanupSessionTempDir(sessionDir);
 		}
 
+		// Shut down the persistent server if it was used
+		if (this.whisperServer) {
+			await this.whisperServer.shutdown();
+			this.whisperServer = null;
+		}
+
 		this.session = null;
 		this.chunkBufferSamples = [];
 		this.totalRecordedSamplesCount = 0;
@@ -587,6 +614,40 @@ export class TranscriptionLive {
 
 		const modelsDir = this.plugin.pythonEnv.getModelsDir();
 
+		const onEvent = (_msg: any) => {};
+
+		// ── Faster-Whisper: route through persistent server ────────────────────
+		if (backendStr === 'faster-whisper') {
+			if (!this.whisperServer?.ready) {
+				// Server should be ready by now; if not, surface the error clearly
+				throw new Error(
+					'Whisper server is not ready. This should not happen — ' +
+					'please stop and restart the live session.'
+				);
+			}
+
+			const result = await this.whisperServer.transcribeChunk(
+				{ chunkPath, chunkStart, sessionId: this.session.id },
+				onEvent
+			);
+
+			// Stage 2: optional Ollama cleanup pass
+			const cleanupModel = (this.plugin.settings as any).liveOllamaCleanupModel ?? '';
+			if (cleanupModel && cleanupModel !== 'off' && result.segments && result.segments.length > 0) {
+				try {
+					const ollamaBackend = new OllamaLiveBackend(this.plugin);
+					const cleanupOptions = { chunkPath, modelId: cleanupModel, chunkStart, sessionId: this.session.id, rawSegments: result.segments, language: this.session.language };
+					const cleaned = await ollamaBackend.transcribeChunk(cleanupOptions as any, onEvent);
+					return { segments: cleaned.segments };
+				} catch {
+					// Ollama cleanup failed — fall through to raw segments
+				}
+			}
+
+			return result;
+		}
+
+		// ── Other backends: existing per-spawn logic (unchanged) ───────────────
 		const options = {
 			chunkPath,
 			modelId,
@@ -596,8 +657,6 @@ export class TranscriptionLive {
 			sessionId: this.session.id
 		};
 
-		const onEvent = (msg: any) => {};
-
 		if (backendStr === 'python-whisper') {
 			const backend = new PythonWhisperLiveBackend(this.plugin);
 			return backend.transcribeChunk(options, onEvent);
@@ -606,6 +665,6 @@ export class TranscriptionLive {
 			return backend.transcribeChunk(options, onEvent);
 		}
 
-		throw new Error("Unknown backend");
+		throw new Error(`Unknown backend: ${backendStr}`);
 	}
 }
