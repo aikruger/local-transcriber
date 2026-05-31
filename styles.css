@@ -18,6 +18,27 @@ If your plugin does not need CSS, delete this file.
   overflow-y: auto;
 }
 
+
+/* ── Live Dictation (Sidebar View) ── */
+.live-transcribe-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+}
+
+.live-transcribe-buttons {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+}
+
+.live-transcribe-buttons button {
+    flex: 1;
+    min-width: 60px;
+}
+
 /* ── Config section ── */
 .lt-config-section { margin-bottom: 12px; }
 

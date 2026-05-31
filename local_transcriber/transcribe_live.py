@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Live Transcription script for local-transcriber plugin.
-Optimized for chunk processing and structured event output.
+Live Transcription script — uses faster-whisper for low-latency chunk processing.
+Output format is JSONL: one JSON object per line on stdout.
 """
 
 import sys
@@ -19,30 +19,29 @@ def emit(data: dict):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
-    parser.add_argument("--model", default="base.en")
+    parser.add_argument("--model", default="tiny")
     parser.add_argument("--language", default="auto")
     parser.add_argument("--speakers", default="0")
     parser.add_argument("--models-dir", default=None)
     parser.add_argument("--chunk-start", type=float, default=0.0)
     parser.add_argument("--session-id", default="live")
     parser.add_argument("--output-format", default="jsonl")
-    parser.add_argument("--word-timestamps", action="store_true", default=True)
+    parser.add_argument("--word-timestamps", action="store_true", default=False)
     parser.add_argument("--no-diarization", action="store_true")
     parser.add_argument("--input-is-normalized-wav", action="store_true")
     args = parser.parse_args()
 
-    language = None if args.language == "auto" else args.language
-    models_dir = args.models_dir
+    language = None if args.language in ("auto", "") else args.language
 
     if args.input_is_normalized_wav:
         target_wav = args.input
         temp_wav = None
     else:
-        # Convert to 16kHz mono WAV if needed
         temp_wav = tempfile.mktemp(suffix=".wav")
         try:
             subprocess.run(
-                ["ffmpeg", "-y", "-i", args.input, "-ac", "1", "-ar", "16000", "-vn", temp_wav],
+                ["ffmpeg", "-y", "-i", args.input,
+                 "-ac", "1", "-ar", "16000", "-vn", temp_wav],
                 check=True, capture_output=True
             )
         except subprocess.CalledProcessError as e:
@@ -51,16 +50,34 @@ def main():
         target_wav = temp_wav
 
     try:
-        import whisper
-        # For live transcription, use the default models directory if available
-        model = whisper.load_model(args.model, download_root=models_dir)
-        result = model.transcribe(target_wav, language=language, word_timestamps=args.word_timestamps)
+        from faster_whisper import WhisperModel
+
+        # int8 quantisation on CPU: ~4-8x faster than openai-whisper
+        model = WhisperModel(
+            args.model,
+            device="cpu",
+            compute_type="int8",
+            download_root=args.models_dir
+        )
+
+        segments_iter, info = model.transcribe(
+            target_wav,
+            language=language,
+            vad_filter=True,           # suppress hallucinations during silence
+            vad_parameters={"min_silence_duration_ms": 300},
+            word_timestamps=False,     # not needed for live dictation, saves time
+            beam_size=1                # greedy decode — faster, still accurate for dictation
+        )
+
+        # faster-whisper returns a generator; consume it fully
+        raw_segments = list(segments_iter)
+
     except Exception as e:
-        emit({"type": "error", "error": f"Whisper failed: {str(e)}"})
+        emit({"type": "error", "error": f"faster-whisper failed: {str(e)}"})
         sys.exit(2)
 
     chunk_filename = os.path.basename(args.input)
-    duration = result["segments"][-1]["end"] if result.get("segments") else 0.0
+    duration = raw_segments[-1].end if raw_segments else 0.0
 
     emit({
         "type": "meta",
@@ -71,15 +88,13 @@ def main():
 
     segments = []
 
-    # Diarization is intentionally disabled for Live Dictation UX but we leave the arg handling.
-    for seg in result.get("segments", []):
-        text = seg["text"].strip()
+    for seg in raw_segments:
+        text = seg.text.strip()
         if text:
-            # Emit natural text for insertion
             entry = {
                 "type": "segment",
-                "start": seg["start"],
-                "end": seg["end"],
+                "start": seg.start,
+                "end": seg.end,
                 "text": text,
                 "speaker": None
             }
@@ -93,7 +108,6 @@ def main():
         "segments": segments
     })
 
-    # Cleanup
     if temp_wav:
         try:
             os.remove(temp_wav)

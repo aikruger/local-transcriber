@@ -1,303 +1,167 @@
-import { App, Modal, Notice, Setting, TFile } from 'obsidian';
+import { ItemView, WorkspaceLeaf } from 'obsidian';
 import LocalTranscriberPlugin from '../main';
-import { LiveTranscriptionSession, LiveSegment } from '../live-session';
 
-export class LiveTranscribeModal extends Modal {
-	private plugin: LocalTranscriberPlugin;
+export const VIEW_TYPE_LIVE_DICTATION = "live-dictation-view";
 
-	// UI Elements
-	private startBtn: HTMLButtonElement;
-	private pauseBtn: HTMLButtonElement;
-	private stopBtn: HTMLButtonElement;
-	private levelMeter: HTMLMeterElement;
-	private timerLabel: HTMLSpanElement;
-	private previewArea: HTMLDivElement;
-	private progressLabel: HTMLSpanElement;
-	private progressBar: HTMLProgressElement;
-	private _micDropdown: any;
+export class LiveDictationView extends ItemView {
+    plugin: LocalTranscriberPlugin;
 
-	private mediaStream: MediaStream | null = null;
-	private audioContext: AudioContext | null = null;
-	private analyser: AnalyserNode | null = null;
-	private meterInterval: number | null = null;
+    private startBtn: HTMLButtonElement;
+    private pauseBtn: HTMLButtonElement;
+    private stopBtn: HTMLButtonElement;
+    private micSelect: HTMLSelectElement;
 
-	private elapsedSeconds: number = 0;
-	private timerInterval: any = null;
+    private statusLabel: HTMLElement;
+    private timeLabel: HTMLElement;
+    private backlogLabel: HTMLElement;
 
-	private _onStartClick?: (micId: string) => void;
-	private _onPauseClick?: () => void;
-	private _onStopClick?: () => void;
+    private previewBox: HTMLElement;
+    private micLevelBar: HTMLElement;
 
-	constructor(app: App, plugin: LocalTranscriberPlugin) {
-		super(app);
-		this.plugin = plugin;
-	}
+    private _onStartClick: ((micId: string) => void) | null = null;
+    private _onPauseClick: (() => void) | null = null;
+    private _onStopClick: (() => void) | null = null;
 
-	async onOpen() {
-		const { contentEl } = this;
-		contentEl.empty();
-		contentEl.addClass('local-transcriber-modal', 'lt-compact-modal');
+    private audioContext: AudioContext | null = null;
+    private analyser: AnalyserNode | null = null;
+    private mediaStream: MediaStream | null = null;
+    private drawFrame: number = 0;
 
-		// Remove locked state - modal shouldn't trap focus for dictation
-		this.modalEl.removeClass('lt-locked');
+    constructor(leaf: WorkspaceLeaf, plugin: LocalTranscriberPlugin) {
+        super(leaf);
+        this.plugin = plugin;
+    }
 
-		const headerRow = contentEl.createDiv({ cls: 'lt-dictation-header' });
-		headerRow.createEl('h3', { text: '🎙 Dictation', cls: 'lt-dictation-title' });
+    getViewType(): string { return VIEW_TYPE_LIVE_DICTATION; }
+    getDisplayText(): string { return "Live Dictation"; }
 
-		const configSection = contentEl.createDiv({ cls: 'lt-config-section' });
+    async onOpen() {
+        const container = this.containerEl.children[1] as HTMLElement;
+        container.empty();
+        container.createEl("h4", { text: "Live Dictation" });
+        this.renderUI(container);
+    }
 
-		new Setting(configSection)
-			.setName('Microphone')
-			.addDropdown((dd: any) => {
-				this._micDropdown = dd;
-				navigator.mediaDevices.enumerateDevices().then(devices => {
-					const audioInputs = devices.filter(d => d.kind === 'audioinput');
-					audioInputs.forEach(d => {
-						dd.addOption(d.deviceId, d.label || `Microphone ${d.deviceId.substring(0, 5)}...`);
-					});
-					if (audioInputs.length > 0) {
-						let deviceId = this.plugin.settings.liveMicDeviceId;
-						if (!audioInputs.find(d => d.deviceId === deviceId)) {
-							const id = audioInputs[0]?.deviceId;
-							if (id) deviceId = id;
-						}
-						if (deviceId) dd.setValue(deviceId);
-					}
-				}).catch(e => {
-					console.error("Failed to list microphones", e);
-				});
+    renderUI(container: HTMLElement) {
+        const controlsDiv = container.createDiv({ cls: 'live-transcribe-controls' });
+        controlsDiv.style.display = 'flex';
+        controlsDiv.style.flexDirection = 'column';
+        controlsDiv.style.gap = '10px';
+        controlsDiv.style.marginBottom = '10px';
 
-				dd.onChange(async (val: string) => {
-					this.plugin.settings.liveMicDeviceId = val;
-					await this.plugin.saveSettings();
-					this.setupLevelMeter(val);
-				});
-			});
+        this.micSelect = container.createEl('select', { cls: 'dropdown' });
+        controlsDiv.appendChild(this.micSelect);
 
-		// Level Meter
-		const meterRow = configSection.createDiv({ cls: 'lt-meter-row' });
-		meterRow.createEl('span', { text: 'Level: ', cls: 'lt-meter-label' });
-		this.levelMeter = meterRow.createEl('meter', { cls: 'lt-level-meter' });
-		this.levelMeter.min = -60;
-		this.levelMeter.max = 0;
-		this.levelMeter.value = -60;
-		this.levelMeter.low = -20;
-		this.levelMeter.high = -5;
-		this.levelMeter.optimum = -10;
+        const buttonsDiv = container.createDiv({ cls: 'live-transcribe-buttons' });
+        buttonsDiv.style.display = 'flex';
+        buttonsDiv.style.gap = '10px';
+        buttonsDiv.style.alignItems = 'center';
 
-		const timerRow = configSection.createDiv({ cls: 'lt-timer-row' });
-		this.timerLabel = timerRow.createEl('span', { text: '00:00', cls: 'lt-timer-label' });
+        this.startBtn = buttonsDiv.createEl('button', { text: 'Start' });
+        this.startBtn.addClass('mod-cta');
+        
+        this.pauseBtn = buttonsDiv.createEl('button', { text: 'Pause' });
+        this.pauseBtn.disabled = true;
+        
+        this.stopBtn = buttonsDiv.createEl('button', { text: 'Stop' });
+        this.stopBtn.disabled = true;
+        
+        controlsDiv.appendChild(buttonsDiv);
 
-		const progressRow = configSection.createDiv({ cls: 'lt-progress-row', attr: {style: 'margin-top: 10px; margin-bottom: 10px; display: flex; flex-direction: column;'} });
-		this.progressLabel = progressRow.createEl('span', { cls: 'lt-progress-label', text: 'Recorded: 0s | Transcribed: 0s | Remaining: 0s' });
-		this.progressBar = progressRow.createEl('progress', { cls: 'lt-progress-bar' });
-		this.progressBar.max = 1;
-		this.progressBar.value = 0;
+        const levelContainer = container.createDiv();
+        levelContainer.style.width = '100%';
+        levelContainer.style.height = '10px';
+        levelContainer.style.backgroundColor = '#333';
+        levelContainer.style.borderRadius = '5px';
+        levelContainer.style.overflow = 'hidden';
+        levelContainer.style.marginBottom = '10px';
 
-		const previewRow = configSection.createDiv({ cls: 'lt-dictation-preview', attr: {style: 'margin-top: 10px; font-style: italic; color: var(--text-muted);'} });
-		this.previewArea = previewRow.createEl('div', { text: 'Waiting for speech...' });
+        this.micLevelBar = levelContainer.createDiv();
+        this.micLevelBar.style.width = '0%';
+        this.micLevelBar.style.height = '100%';
+        this.micLevelBar.style.backgroundColor = '#4caf50';
 
-		const btnRow = contentEl.createDiv({ cls: 'lt-btn-row' });
-		this.startBtn = btnRow.createEl('button', {
-			text: '▶ Start',
-			cls: 'mod-cta lt-transcribe-btn',
-		});
-		this.startBtn.addEventListener('click', () => {
-			if (this._onStartClick) {
-				const micId = this._micDropdown.getValue();
-				this._onStartClick(micId);
-			}
-		});
+        const infoDiv = container.createDiv();
+        infoDiv.style.display = 'flex';
+        infoDiv.style.flexDirection = 'column';
+        infoDiv.style.gap = '5px';
+        infoDiv.style.fontSize = '0.9em';
+        infoDiv.style.color = 'var(--text-muted)';
 
-		this.pauseBtn = btnRow.createEl('button', {
-			text: '⏸ Pause',
-			cls: 'lt-transcribe-btn lt-hidden',
-		});
-		this.pauseBtn.addEventListener('click', () => {
-			if (this._onPauseClick) this._onPauseClick();
-		});
+        this.statusLabel = infoDiv.createDiv({ text: 'Status: Idle' });
+        this.timeLabel = infoDiv.createDiv({ text: 'Time: 00:00' });
+        this.backlogLabel = infoDiv.createDiv({ text: 'Backlog: 0s' });
 
-		this.stopBtn = btnRow.createEl('button', {
-			text: '⏹ Stop',
-			cls: 'lt-transcribe-btn lt-hidden',
-		});
-		this.stopBtn.addEventListener('click', () => {
-			if (this._onStopClick) this._onStopClick();
-		});
+        this.previewBox = container.createDiv({ cls: 'live-transcribe-preview' });
+        this.previewBox.style.padding = '10px';
+        this.previewBox.style.border = '1px solid var(--background-modifier-border)';
+        this.previewBox.innerText = 'Preview...';
 
-		// Setup initial level meter
-		if (this.plugin.settings.liveMicDeviceId) {
-			this.setupLevelMeter(this.plugin.settings.liveMicDeviceId);
-		} else {
-			navigator.mediaDevices.enumerateDevices().then(devices => {
-				const audioInputs = devices.filter(d => d.kind === 'audioinput');
-				if (audioInputs.length > 0) {
-					const id = audioInputs[0]?.deviceId;
-					if (id) {
-						this.setupLevelMeter(id);
-					}
-				}
-			});
-		}
+        this.populateMics();
 
-		// If session is already recording, update UI to reflect it
-		if (this.plugin.transcriptionLive?.isRecording()) {
-			this.setRecordingState('recording');
-		} else if (this.plugin.transcriptionLive?.isPaused?.()) {
-			this.setRecordingState('paused');
-		}
-	}
+        this.startBtn.onclick = () => {
+            if (this._onStartClick) this._onStartClick(this.micSelect.value);
+        };
+        this.pauseBtn.onclick = () => { if (this._onPauseClick) this._onPauseClick(); };
+        this.stopBtn.onclick = () => { if (this._onStopClick) this._onStopClick(); };
+    }
 
-	async setupLevelMeter(deviceId: string) {
-		this.cleanupMeter();
-		try {
-			this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId } });
-			this.audioContext = new AudioContext();
-			const source = this.audioContext.createMediaStreamSource(this.mediaStream);
-			this.analyser = this.audioContext.createAnalyser();
-			this.analyser.fftSize = 256;
-			source.connect(this.analyser);
-			const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+    async populateMics() {
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const audioInputs = devices.filter(d => d.kind === 'audioinput');
+            for (const dev of audioInputs) {
+                const opt = document.createElement('option');
+                opt.value = dev.deviceId;
+                opt.text = dev.label || `Mic ${this.micSelect.options.length + 1}`;
+                this.micSelect.appendChild(opt);
+            }
+        } catch (e) {}
+    }
 
-			const updateMeter = () => {
-				if (!this.analyser) return;
-				this.analyser.getByteFrequencyData(dataArray);
-				let max = 0;
-				for(let i = 0; i < dataArray.length; i++) {
-					const val = dataArray[i];
-					if(val !== undefined && val > max) max = val;
-				}
-				// Convert to roughly dB (-60 to 0)
-				const db = max > 0 ? 20 * Math.log10(max / 255) : -60;
-				if (this.levelMeter) {
-					this.levelMeter.value = db;
-				}
-				this.meterInterval = window.requestAnimationFrame(updateMeter) as any;
-			};
-			updateMeter();
-		} catch (e) {
-			console.error("Failed to setup level meter", e);
-		}
-	}
+    async startMicLevel() {
+        try {
+            this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: this.micSelect.value } });
+            this.audioContext = new AudioContext();
+            this.analyser = this.audioContext.createAnalyser();
+            this.drawMicLevel();
+        } catch (e) {}
+    }
 
-	startTimer() {
-		if (!this.timerInterval) {
-			this.timerInterval = setInterval(() => {
-				this.elapsedSeconds++;
-				const mins = Math.floor(this.elapsedSeconds / 60).toString().padStart(2, '0');
-				const secs = (this.elapsedSeconds % 60).toString().padStart(2, '0');
-				if (this.timerLabel) {
-					this.timerLabel.textContent = `${mins}:${secs}`;
-				}
-			}, 1000);
-		}
-	}
+    stopMicLevel() {
+        cancelAnimationFrame(this.drawFrame);
+        if (this.mediaStream) this.mediaStream.getTracks().forEach(t => t.stop());
+        if (this.audioContext) this.audioContext.close();
+        this.micLevelBar.style.width = '0%';
+    }
 
-	stopTimer() {
-		if (this.timerInterval) {
-			clearInterval(this.timerInterval);
-			this.timerInterval = null;
-		}
-	}
+    drawMicLevel = () => {
+        if (!this.analyser) return;
+        const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+        this.analyser.getByteFrequencyData(dataArray);
+        const avg = dataArray.reduce((a, b) => a + b) / dataArray.length;
+        this.micLevelBar.style.width = `${Math.min(100, (avg / 128) * 100)}%`;
+        this.drawFrame = requestAnimationFrame(this.drawMicLevel);
+    }
 
-	resetTimer() {
-		this.stopTimer();
-		this.elapsedSeconds = 0;
-		if (this.timerLabel) {
-			this.timerLabel.textContent = '00:00';
-		}
-	}
+    async onClose() { this.stopMicLevel(); }
+    onStartClick(cb: (micId: string) => void) { this._onStartClick = cb; }
+    onPauseClick(cb: () => void) { this._onPauseClick = cb; }
+    onStopClick(cb: () => void) { this._onStopClick = cb; }
 
-	cleanupMeter() {
-		if (this.meterInterval !== null) {
-			window.cancelAnimationFrame(this.meterInterval);
-			this.meterInterval = null;
-		}
-		if (this.audioContext) {
-			this.audioContext.close();
-			this.audioContext = null;
-		}
-		if (this.mediaStream) {
-			this.mediaStream.getTracks().forEach(t => t.stop());
-			this.mediaStream = null;
-		}
-	}
+    setRecordingState(state: 'idle' | 'recording' | 'paused') {
+        const rec = state === 'recording';
+        this.startBtn.disabled = rec;
+        this.pauseBtn.disabled = !rec;
+        this.stopBtn.disabled = !rec && state !== 'paused';
+        if (rec) this.startMicLevel(); else this.stopMicLevel();
+    }
 
-	onStartClick(callback: (micId: string) => void) {
-		this._onStartClick = callback;
-	}
+    log(msg: string) { console.log(`[Dictation UI] ${msg}`); }
+    setPreviewText(text: string) { this.previewBox.innerText = text; }
 
-	onPauseClick(callback: () => void) {
-		this._onPauseClick = callback;
-	}
-
-	onStopClick(callback: () => void) {
-		this._onStopClick = callback;
-	}
-
-	setRecordingState(status: 'idle' | 'recording' | 'paused') {
-		if (status === 'recording') {
-			this.startBtn.addClass('lt-hidden');
-			this.pauseBtn.removeClass('lt-hidden');
-			this.stopBtn.removeClass('lt-hidden');
-			if (this._micDropdown) this._micDropdown.selectEl.disabled = true;
-			this.startTimer();
-		} else if (status === 'paused') {
-			this.startBtn.removeClass('lt-hidden');
-			this.startBtn.textContent = '▶ Resume';
-			this.pauseBtn.addClass('lt-hidden');
-			this.stopBtn.removeClass('lt-hidden');
-			if (this._micDropdown) this._micDropdown.selectEl.disabled = true;
-			this.stopTimer();
-		} else {
-			this.startBtn.removeClass('lt-hidden');
-			this.startBtn.textContent = '▶ Start Dictation';
-			this.pauseBtn.addClass('lt-hidden');
-			this.stopBtn.addClass('lt-hidden');
-			if (this._micDropdown) this._micDropdown.selectEl.disabled = false;
-			this.resetTimer();
-		}
-	}
-
-	log(text: string) {
-		// Log removed from modal, use console for debug if needed
-		console.log(`[Dictation] ${text}`);
-	}
-
-	setPreviewText(text: string) {
-		if (this.previewArea) {
-			this.previewArea.textContent = text || 'Waiting for speech...';
-		}
-	}
-
-	setTranscriptionProgress(recordedSecs: number, transcribedSecs: number, isProcessing: boolean, isFinalizing: boolean) {
-		const remaining = Math.max(0, recordedSecs - transcribedSecs);
-		if (this.progressLabel) {
-			const rStr = Math.floor(recordedSecs).toString();
-			const tStr = Math.floor(transcribedSecs).toString();
-			const remStr = Math.floor(remaining).toString();
-			let label = `Recorded: ${rStr}s | Transcribed: ${tStr}s | Remaining: ${remStr}s`;
-			if (isFinalizing) {
-				label += ' (Finalizing...)';
-			} else if (isProcessing) {
-				label += ' (Transcribing...)';
-			}
-			this.progressLabel.textContent = label;
-		}
-		if (this.progressBar) {
-			const progress = recordedSecs > 0 ? Math.min(1, Math.max(0, transcribedSecs / recordedSecs)) : 0;
-			this.progressBar.value = progress;
-
-			if (isProcessing || isFinalizing) {
-				this.progressBar.addClass('lt-progress-indeterminate');
-			} else {
-				this.progressBar.removeClass('lt-progress-indeterminate');
-			}
-		}
-	}
-
-	onClose() {
-		this.cleanupMeter();
-		this.contentEl.empty();
-	}
+    setTranscriptionProgress(recorded: number, transcribed: number, isProcessing: boolean) {
+        this.timeLabel.innerText = `Time: ${recorded.toFixed(0)}s / ${transcribed.toFixed(0)}s`;
+        this.statusLabel.innerText = isProcessing ? "Status: Processing" : "Status: Listening";
+    }
 }

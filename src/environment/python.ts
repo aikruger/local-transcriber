@@ -3,9 +3,9 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import { execFile, spawn } from 'child_process';
-import LocalTranscriberPlugin from './main';
+import LocalTranscriberPlugin from '../main';
 
-export class Environment {
+export class PythonEnvironment {
 	plugin: LocalTranscriberPlugin;
 	app: App;
 
@@ -37,16 +37,12 @@ export class Environment {
 			throw new Error("FFmpeg is required. Please install FFmpeg and add it to PATH.");
 		}
 
-		this.plugin.settings.envReady = true;
-		await this.plugin.saveSettings();
+		logger.setStage('Installing dependencies and models...');
+		await this.bootstrapPython(logger);
 
-		if (!this.plugin.settings.modelsReady) {
-			logger.setStage('Bootstrapping models');
-			logger.log('Downloading models (~500MB)...');
-			await this.bootstrapPython(logger);
-			this.plugin.settings.modelsReady = true;
-			await this.plugin.saveSettings();
-		}
+		this.plugin.settings.envReady = true;
+		this.plugin.settings.modelsReady = true;
+		await this.plugin.saveSettings();
 	}
 
 	getModelsDir(): string {
