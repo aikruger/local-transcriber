@@ -17,6 +17,11 @@ export class TranscribeModal extends Modal {
 	private _onTranscribeClick: (() => void) | null = null;
 	public _isRunning = false;
 
+	private timerInterval: number | null = null;
+	private startTime: number | null = null;
+	private timerEl: HTMLElement;
+	public estimatedDuration: number = 0;
+
 	constructor(app: App, plugin: LocalTranscriberPlugin) {
 		super(app);
 		this.plugin = plugin;
@@ -43,20 +48,54 @@ export class TranscribeModal extends Modal {
 				});
 			});
 
+		let customSpeakerInput: HTMLInputElement | null = null;
+
 		new Setting(contentEl)
 			.setName('Speakers')
-			.setDesc('Number of speakers.')
-			.addDropdown(dropdown => dropdown
-				.addOption('0', 'None')
-				.addOption('auto', 'Auto-detect')
-				.addOption('2', '2 speakers')
-				.addOption('3', '3 speakers')
-				.addOption('4', '4 speakers')
-				.setValue(this.selectedSpeakers)
-				.onChange(value => {
-					this.selectedSpeakers = value;
-				})
-			);
+			.setDesc('Number of speakers for diarization. Choose auto-detect or enter a custom count.')
+			.addDropdown(dropdown => {
+				dropdown
+					.addOption('0', 'None (no diarization)')
+					.addOption('auto', 'Auto-detect')
+					.addOption('2', '2 speakers')
+					.addOption('3', '3 speakers')
+					.addOption('4', '4 speakers')
+					.addOption('5', '5 speakers')
+					.addOption('custom', 'Custom...')
+					.setValue(
+						['0','auto','2','3','4','5'].includes(this.selectedSpeakers)
+							? this.selectedSpeakers
+							: 'custom'
+					)
+					.onChange(value => {
+						console.log(`[TranscribeModal] Speakers dropdown changed to: ${value}`);
+						if (value === 'custom') {
+							if (customSpeakerInput) customSpeakerInput.style.display = 'inline-block';
+						} else {
+							this.selectedSpeakers = value;
+							if (customSpeakerInput) customSpeakerInput.style.display = 'none';
+						}
+					});
+			})
+			.addText(t => {
+				customSpeakerInput = t.inputEl;
+				t.setPlaceholder('e.g. 6')
+					.setValue(
+						['0','auto','2','3','4','5'].includes(this.selectedSpeakers) ? '' : this.selectedSpeakers
+					)
+					.onChange(value => {
+						const n = parseInt(value);
+						if (!isNaN(n) && n > 0) {
+							this.selectedSpeakers = String(n);
+							console.log(`[TranscribeModal] Custom speaker count set to: ${this.selectedSpeakers}`);
+						}
+					});
+				t.inputEl.style.width = '60px';
+				// Hide unless 'custom' is already selected
+				t.inputEl.style.display = (
+					['0','auto','2','3','4','5'].includes(this.selectedSpeakers) ? 'none' : 'inline-block'
+				);
+			});
 
 		const controlsDiv = contentEl.createDiv({ cls: 'transcribe-modal-controls' });
 		controlsDiv.style.marginTop = '20px';
@@ -83,6 +122,14 @@ export class TranscribeModal extends Modal {
 		this.progressBar.style.backgroundColor = 'var(--interactive-accent)';
 		this.progressBar.style.transition = 'width 0.2s ease-in-out';
 
+		this.timerEl = contentEl.createDiv({ cls: 'transcribe-timer' });
+		this.timerEl.style.marginTop = '8px';
+		this.timerEl.style.fontSize = '0.85em';
+		this.timerEl.style.color = 'var(--text-muted)';
+		this.timerEl.style.fontVariantNumeric = 'tabular-nums';
+		this.timerEl.innerText = '';
+		console.log('[TranscribeModal] Timer element created');
+
 		this.logArea = contentEl.createEl('div');
 		this.logArea.style.marginTop = '10px';
 		this.logArea.style.fontSize = '0.9em';
@@ -101,7 +148,16 @@ export class TranscribeModal extends Modal {
 		this.previewArea.innerText = 'Transcript preview will appear here...';
 	}
 
+	stopTimer() {
+		if (this.timerInterval !== null) {
+			window.clearInterval(this.timerInterval);
+			this.timerInterval = null;
+			console.log('[TranscribeModal] Timer stopped');
+		}
+	}
+
 	onClose() {
+		this.stopTimer();
 		const { contentEl } = this;
 		contentEl.empty();
 	}
@@ -116,6 +172,32 @@ export class TranscribeModal extends Modal {
 		this.transcribeBtn.textContent = 'Transcribing...';
 		this.setProgress(0);
 		this.previewArea.innerText = '';
+
+		// ✅ Start elapsed timer
+		this.startTime = Date.now();
+		console.log('[TranscribeModal] Timer started');
+		this.timerInterval = window.setInterval(() => {
+			if (!this.startTime) return;
+			const elapsed = Math.floor((Date.now() - this.startTime) / 1000);
+			const m = Math.floor(elapsed / 60).toString().padStart(2, '0');
+			const s = (elapsed % 60).toString().padStart(2, '0');
+			let label = `⏱ Elapsed: ${m}:${s}`;
+
+			// Show estimated remaining if we have audio duration
+			if (this.estimatedDuration > 0) {
+				const pct = parseFloat(this.progressBar.style.width) / 100;
+				if (pct > 0.05) {
+					const totalEstSec = Math.floor(elapsed / pct);
+					const remainSec = Math.max(0, totalEstSec - elapsed);
+					const rm = Math.floor(remainSec / 60).toString().padStart(2, '0');
+					const rs = (remainSec % 60).toString().padStart(2, '0');
+					label += `  |  ⏳ ~${rm}:${rs} remaining`;
+				}
+			}
+
+			this.timerEl.innerText = label;
+			console.log(`[TranscribeModal] Timer tick: ${label}`);
+		}, 1000);
 	}
 
 	setStage(stage: string) {
@@ -130,13 +212,33 @@ export class TranscribeModal extends Modal {
 		this.progressBar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
 	}
 
-	appendPreview(text: string) {
+	appendPreview(text: string, speaker: string | null = null) {
 		if (this.previewArea.innerText === 'Transcript preview will appear here...') {
 			this.previewArea.innerText = '';
 		}
+
 		const p = document.createElement('div');
 		p.innerText = text;
-		p.style.marginBottom = '5px';
+		p.style.marginBottom = '4px';
+		p.style.paddingLeft = '8px';
+		p.style.borderRadius = '2px';
+
+		// Assign a distinct colour per speaker using CSS accent variables
+		const speakerColors: Record<string, string> = {
+			'SPEAKER_00': 'var(--color-blue)',
+			'SPEAKER_01': 'var(--color-green)',
+			'SPEAKER_02': 'var(--color-orange)',
+			'SPEAKER_03': 'var(--color-purple)',
+			'SPEAKER_04': 'var(--color-pink)',
+		};
+
+		if (speaker && speakerColors[speaker]) {
+			p.style.borderLeft = `3px solid ${speakerColors[speaker]}`;
+			console.log(`[TranscribeModal] appendPreview — speaker="${speaker}", color applied`);
+		} else {
+			p.style.borderLeft = '3px solid var(--background-modifier-border)';
+		}
+
 		this.previewArea.appendChild(p);
 		this.previewArea.scrollTop = this.previewArea.scrollHeight;
 	}
