@@ -64,6 +64,8 @@ export class TranscriptionFile {
 
 				modal.setStage('Done');
 				modal._isRunning = false;
+				modal.stopTimer();
+				console.log('[TranscriptionFile] Transcription complete, timer stopped');
 				modal.transcribeBtn.textContent = '✅ Done — Transcribe again?';
 				modal.transcribeBtn.disabled = false;
 				new Notice('Transcription completed!');
@@ -71,6 +73,8 @@ export class TranscriptionFile {
 				const msg = err?.message ?? 'Unknown error';
 				modal.log(`❌ Error: ${msg}`);
 				modal._isRunning = false;
+				modal.stopTimer();
+				console.log('[TranscriptionFile] Transcription error, timer stopped');
 				modal.transcribeBtn.textContent = '❌ Failed — Retry?';
 				modal.transcribeBtn.disabled = false;
 				new Notice(`Transcription failed — see modal for details.`);
@@ -139,6 +143,8 @@ export class TranscriptionFile {
 
 				modal.setStage('Done');
 				modal._isRunning = false;
+				modal.stopTimer();
+				console.log('[TranscriptionFile] Transcription complete, timer stopped');
 				modal.transcribeBtn.textContent = '✅ Done — Transcribe again?';
 				modal.transcribeBtn.disabled = false;
 				new Notice('Transcription completed!');
@@ -146,6 +152,8 @@ export class TranscriptionFile {
 				const msg = err?.message ?? 'Unknown error';
 				modal.log(`❌ Error: ${msg}`);
 				modal._isRunning = false;
+				modal.stopTimer();
+				console.log('[TranscriptionFile] Transcription error, timer stopped');
 				modal.transcribeBtn.textContent = '❌ Failed — Retry?';
 				modal.transcribeBtn.disabled = false;
 				new Notice(`Transcription failed — see modal for details.`);
@@ -185,13 +193,16 @@ export class TranscriptionFile {
 					? `Speaker ${parseInt(msg.speaker.replace('SPEAKER_', '')) + 1}: `
 					: '';
 				const timestamp = this.plugin.outputWriters.formatTimeTxt(msg.start);
-				modal.appendPreview(`${timestamp} ${speaker}${msg.text}`);
+				modal.appendPreview(`${timestamp} ${speaker}${msg.text}`, msg.speaker ?? null);
 				if (totalDuration > 0) {
 					const pct = 40 + ((msg.end / totalDuration) * 43);
 					modal.setProgress(pct);
 				}
 			} else if (msg.type === 'meta') {
 				totalDuration = msg.duration || 0;
+				// ✅ Pass duration to modal for remaining-time estimate
+				modal.estimatedDuration = totalDuration;
+				console.log(`[TranscriptionFile] Audio duration from meta: ${totalDuration}s`);
 			}
 		};
 
