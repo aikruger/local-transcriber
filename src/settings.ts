@@ -98,7 +98,53 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 		// Live models — NEVER filtered, so the dropdown is never empty
 		const liveModels = allModels.filter((m) => m.modeSupport.includes("live"));
 
-		// ── 1. FILE TRANSCRIPTION ───────────────────────────────────────────
+		// ── 1. ENVIRONMENT & MODELS ─────────────────────────────────────────
+		addSectionHeader(
+			containerEl,
+			"⚙️ Environment & Models",
+			"Configure the local Python environment, model storage, and installed model lists."
+		);
+
+		new Setting(containerEl)
+			.setName("Reset environment")
+			.setDesc("Reset the environment state, clear installed models, and force re-running the bootstrap script.")
+			.addButton((btn) =>
+							btn.setButtonText("Reset Environment").onClick(async () => {
+								this.plugin.settings.modelsReady = false;
+								this.plugin.settings.envReady = false;
+								await this.plugin.saveSettings();
+					
+								new Notice("Resetting environment... this may take a moment.");
+								try {
+									await this.plugin.pythonEnv.setupWhisperEnvironment({
+										log: (msg) => console.log(`[Bootstrap] ${msg}`),
+										setStage: (stage) => new Notice(`Stage: ${stage}`)
+									});
+									new Notice("Environment ready!");
+								} catch (e: any) {
+									new Notice(`Failed to reset environment: ${e.message}`);
+								}
+								this.display();
+							})
+						);
+
+		new Setting(containerEl)
+			.setName("Refresh Ollama model list")
+			.setDesc(
+				"Query the local Ollama instance and update the list of available models. " +
+				"Run this after installing a new model with 'ollama pull'."
+			)
+			.addButton((btn) =>
+				btn.setButtonText("Refresh Ollama models").onClick(async () => {
+					await this.plugin.modelDiscovery.refreshAll(
+						this.plugin.settings.availableModels
+					);
+					new Notice("Ollama model list refreshed.");
+					this.display();
+				})
+			);
+
+		// ── 2. FILE TRANSCRIPTION ───────────────────────────────────────────
 		addSectionHeader(
 			containerEl,
 			"📄 File Transcription",
@@ -193,7 +239,7 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 					})
 			);
 
-		// ── 2. LIVE TRANSCRIPTION ───────────────────────────────────────────
+		// ── 3. LIVE TRANSCRIPTION ───────────────────────────────────────────
 		addSectionHeader(
 			containerEl,
 			"🎙 Live Transcription",
@@ -203,7 +249,7 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 
 		if (liveModels.length === 0) {
 			containerEl.createEl("p", {
-				text: "⚠️  No live-capable models found. Install Faster Whisper or refresh Ollama models in the Environment section below.",
+				text: "⚠️  No live-capable models found. Install Faster Whisper or refresh Ollama models in the Environment section above.",
 				cls: "lt-warning",
 			});
 		} else {
@@ -391,7 +437,7 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 					})
 			);
 
-		// ── 3. OUTPUT ───────────────────────────────────────────────────────
+		// ── 4. OUTPUT ───────────────────────────────────────────────────────
 		addSectionHeader(
 			containerEl,
 			"💾 Output",
@@ -479,51 +525,12 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 					})
 			);
 
-		// ── 4. ENVIRONMENT & MODELS ─────────────────────────────────────────
+		// ── 5. ADVANCED ENVIRONMENT ─────────────────────────────────────────
 		addSectionHeader(
 			containerEl,
-			"⚙️ Environment & Models",
-			"Configure the local Python environment, model storage, and installed model lists. " +
-			"You do not normally need to change these after initial setup."
+			"⚙️ Advanced Environment",
+			"Configure the local Python environment, model storage, and installed model lists."
 		);
-
-		new Setting(containerEl)
-			.setName("Refresh Ollama model list")
-			.setDesc(
-				"Query the local Ollama instance and update the list of available models. " +
-				"Run this after installing a new model with 'ollama pull'."
-			)
-			.addButton((btn) =>
-				btn.setButtonText("Refresh Ollama models").onClick(async () => {
-					await this.plugin.modelDiscovery.refreshAll(
-						this.plugin.settings.availableModels
-					);
-					new Notice("Ollama model list refreshed.");
-					this.display();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("Python Whisper model list")
-			.setDesc(
-				"Only relevant if you are using the legacy Python Whisper backend. " +
-				"Enter one model name per line (e.g. tiny, base, small, medium, large-v3). " +
-				"These names must match official Whisper identifiers and appear in the File Model dropdown " +
-				"when the Python Whisper backend is selected."
-			)
-			.addTextArea((text) =>
-				text
-					.setPlaceholder("tiny\nbase\nsmall")
-					.setValue(this.plugin.settings.availableModels)
-					.onChange(async (value) => {
-						this.plugin.settings.availableModels = value;
-						await this.plugin.saveSettings();
-						await this.plugin.modelDiscovery.refreshAll(
-							this.plugin.settings.availableModels
-						);
-						this.display();
-					})
-			);
 
 		new Setting(containerEl)
 			.setName("Models folder")
@@ -569,6 +576,26 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.installOnWindows = value;
 						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Python Whisper model list")
+			.setDesc(
+				"Only relevant if you are using the legacy Python Whisper backend. " +
+				"Enter one model name per line (e.g. tiny, base, small, medium, large-v3)."
+			)
+			.addTextArea((text) =>
+				text
+					.setPlaceholder("tiny\nbase\nsmall")
+					.setValue(this.plugin.settings.availableModels)
+					.onChange(async (value) => {
+						this.plugin.settings.availableModels = value;
+						await this.plugin.saveSettings();
+						await this.plugin.modelDiscovery.refreshAll(
+							this.plugin.settings.availableModels
+						);
+						this.display();
 					})
 			);
 	}

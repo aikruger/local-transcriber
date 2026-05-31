@@ -131,9 +131,10 @@ export class WhisperServerBackend {
   }
 
   /** Send shutdown and wait for the process to exit. */
-  async shutdown(): Promise<void> {
+    async shutdown(): Promise<void> {
     if (!this.process) return;
 
+    console.log("[WhisperServer] Sending shutdown signal...");
     try {
       if (this.process.stdin && !this.process.stdin.destroyed) {
         this.process.stdin.write(JSON.stringify({ type: "shutdown" }) + "\n");
@@ -142,11 +143,13 @@ export class WhisperServerBackend {
 
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
+        console.warn("[WhisperServer] Shutdown timed out, killing process.");
         this.process?.kill("SIGKILL");
         resolve();
       }, 5000);
 
-      this.process!.on("exit", () => {
+      this.process!.on("exit", (code) => {
+        console.log(`[WhisperServer] Process exited with code ${code}`);
         clearTimeout(timeout);
         this.process = null;
         this.rl = null;

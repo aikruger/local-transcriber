@@ -1,9 +1,7 @@
-import { App, Notice } from 'obsidian';
+import { App, Notice, WorkspaceLeaf } from 'obsidian';
 import LocalTranscriberPlugin from './main';
-import { LiveTranscribeModal } from './ui/live-modal';
-import { LiveTranscriptionSession, LiveSegment } from './live-session';
-import { PythonWhisperLiveBackend } from './transcription/live/python-whisper';
-import { OllamaLiveBackend } from './transcription/live/ollama';
+import { VIEW_TYPE_LIVE_DICTATION, LiveDictationView } from './ui/live-modal';
+import { LiveTranscriptionSession } from './live-session';
 import { WhisperServerBackend } from './transcription/live/whisper-server-backend';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -14,570 +12,139 @@ export class TranscriptionLive {
 
 	private session: LiveTranscriptionSession | null = null;
 	private whisperServer: WhisperServerBackend | null = null;
-	private isProcessingChunk: boolean = false;
-	private chunkQueue: string[] = [];
+	private modal: LiveDictationView | null = null;
 
-	private modal: LiveTranscribeModal | null = null;
-
-	// Audio capture state
 	private audioContext: AudioContext | null = null;
 	private mediaStream: MediaStream | null = null;
 	private processor: ScriptProcessorNode | null = null;
 	private sourceNode: MediaStreamAudioSourceNode | null = null;
 	private chunkBufferSamples: Float32Array[] = [];
-	private tempPcmPath: string | null = null;
+	private isProcessingChunk: boolean = false;
 	private totalRecordedSamplesCount: number = 0;
-	private recordingOffset: number = 0;
-	private sampleRate: number = 16000;
-
-	private failedChunks: string[] = [];
+	private statusBarTimer: number | null = null;
 
 	constructor(plugin: LocalTranscriberPlugin) {
 		this.plugin = plugin;
 		this.app = plugin.app;
 	}
 
-	isRecording(): boolean {
-		return this.session !== null && this.session.status === 'recording';
+	async handleTranscribeLive(view: LiveDictationView) {
+		this.modal = view;
+		this.modal.onStartClick(async (micId: string) => await this.startRecording(micId));
+		this.modal.onPauseClick(() => this.pauseRecording());
+		this.modal.onStopClick(async () => await this.stopRecording());
 	}
 
-	isPaused(): boolean {
-		return this.session !== null && this.session.status === 'paused';
-	}
+	async startRecording(micId: string) {
+		if (this.session) await this.stopRecording();
 
-	async handleTranscribeLive() {
-		if (!this.modal || !document.contains(this.modal.modalEl)) {
-			this.modal = new LiveTranscribeModal(this.app, this.plugin);
-			this.modal.open();
+		const now = new Date();
+		const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+		const sessionId = `live-${timestamp}`;
+		const sessionDirPath = `${this.app.vault.configDir}/plugins/local-transcriber/tmp/${sessionId}/`;
+		
+		const adapter = this.app.vault.adapter as any;
+		await adapter.mkdir(sessionDirPath + 'chunks/');
+
+		this.session = {
+			id: sessionId,
+			status: 'recording',
+			model: this.plugin.settings.liveModelSize || 'faster-whisper::base',
+			language: this.plugin.settings.liveLanguage || 'en',
+			sessionDir: sessionDirPath,
+			chunksProcessed: 0
+		} as any;
+
+		const [backendStr, modelName] = this.session!.model.split('::');
+		if (backendStr === 'faster-whisper') {
+			this.whisperServer = new WhisperServerBackend(this.plugin);
+			await this.whisperServer.start(modelName || "base", this.session!.language);
 		}
 
-		this.modal.onStartClick(async (micId: string) => {
-			try {
-				if (this.isPaused()) {
-					await this.resumeLiveSession();
-				} else {
-					const fullModelId = this.plugin.settings.liveModelSize;
-					const backendStr = fullModelId.split('::')[0];
-					if (backendStr === 'python-whisper') {
-						await this.plugin.pythonEnv.setupWhisperEnvironment({
-							log: (msg) => console.log(`[Dictation] ${msg}`),
-							setStage: (stage) => console.log(`[Dictation Stage] ${stage}`)
-						});
-					} else if (backendStr === 'ollama') {
-						if (!await this.plugin.ollamaEnv.isOllamaRunning()) {
-							throw new Error("Ollama is not running.");
-						}
-					}
-					await this.startLiveSession(micId);
+		this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: micId } });
+		this.audioContext = new AudioContext({ sampleRate: 16000 });
+		this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+		this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
+		this.totalRecordedSamplesCount = 0;
+
+		this.processor.onaudioprocess = (e) => {
+			if (!this.session || this.session.status !== 'recording') return;
+			const inputData = e.inputBuffer.getChannelData(0);
+			this.chunkBufferSamples.push(new Float32Array(inputData));
+			this.totalRecordedSamplesCount += inputData.length;
+			if (this.chunkBufferSamples.length > (16000 * 5) / 4096) {
+				this.extractChunk();
+			}
+		};
+
+		this.sourceNode.connect(this.processor);
+		this.processor.connect(this.audioContext.destination);
+		this.modal?.setRecordingState('recording');
+
+		this.statusBarTimer = window.setInterval(() => {
+			if (this.session && this.session.status === 'recording') {
+				const elapsed = Math.floor(this.totalRecordedSamplesCount / 16000);
+				const m = Math.floor(elapsed / 60);
+				const s = elapsed % 60;
+				this.plugin.statusBarItem.setText(`🎙 REC ${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`);
+			}
+		}, 1000);
+	}
+
+	async extractChunk() {
+		if (this.isProcessingChunk || !this.session) return;
+		this.isProcessingChunk = true;
+
+		const samples = new Float32Array(this.chunkBufferSamples.reduce((a, b) => a + b.length, 0));
+		let offset = 0;
+		for (const buf of this.chunkBufferSamples) { samples.set(buf, offset); offset += buf.length; }
+		this.chunkBufferSamples = [];
+
+		const adapter = this.app.vault.adapter as any;
+		const chunkPath = path.join(adapter.getBasePath(), this.session.sessionDir, `chunks/chunk-${Date.now()}.wav`);
+		fs.writeFileSync(chunkPath, Buffer.from(this.encodeWAV(samples, 16000)));
+
+		try {
+			const result: any = await this.whisperServer!.transcribeChunk({ chunkPath, chunkStart: 0, sessionId: this.session.id }, (event) => {
+				if (event.type === 'segment') this.modal?.setPreviewText(event.text);
+			});
+			if (result?.segments) {
+				for (const seg of result.segments) {
+					this.insertLiveChunkAtCursor(seg.text);
 				}
-			} catch (err: any) {
-				const msg = err?.message ?? 'Unknown error';
-				this.modal?.log(`❌ Error: ${msg}`);
-				new Notice(`Live Transcription failed — see modal for details.`);
 			}
-		});
-
-		this.modal.onPauseClick(() => {
-			this.pauseLiveSession();
-		});
-
-		this.modal.onStopClick(async () => {
-			await this.stopLiveSession();
-		});
-	}
-
-	isSamplesSilent(samples: Float32Array, gateDb: number): boolean {
-		if (gateDb <= -60) return false;
-		let sumSquares = 0;
-		for (let i = 0; i < samples.length; i++) {
-			const s = samples[i];
-			if (s !== undefined) {
-				sumSquares += s * s;
-			}
+			this.session.chunksProcessed++;
+			this.updateProgress();
+		} finally {
+			this.isProcessingChunk = false;
 		}
-		const rms = Math.sqrt(sumSquares / samples.length);
-		const db = rms > 0 ? 20 * Math.log10(rms) : -60;
-		return db < gateDb;
 	}
 
 	encodeWAV(samples: Float32Array, sampleRate: number): ArrayBuffer {
 		const buffer = new ArrayBuffer(44 + samples.length * 2);
 		const view = new DataView(buffer);
-		const writeString = (view: DataView, offset: number, string: string) => {
-			for (let i = 0; i < string.length; i++) {
-				view.setUint8(offset + i, string.charCodeAt(i));
-			}
-		};
-		writeString(view, 0, 'RIFF');
-		view.setUint32(4, 36 + samples.length * 2, true);
-		writeString(view, 8, 'WAVE');
-		writeString(view, 12, 'fmt ');
-		view.setUint32(16, 16, true);
-		view.setUint16(20, 1, true); // PCM
-		view.setUint16(22, 1, true); // Mono
-		view.setUint32(24, sampleRate, true);
-		view.setUint32(28, sampleRate * 2, true);
-		view.setUint16(32, 2, true);
-		view.setUint16(34, 16, true);
-		writeString(view, 36, 'data');
-		view.setUint32(40, samples.length * 2, true);
-		let offset = 44;
-		for (let i = 0; i < samples.length; i++, offset += 2) {
-			const val = samples[i];
-			if (val !== undefined) {
-				const s = Math.max(-1, Math.min(1, val));
-				view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-			}
+		const writeString = (v: DataView, o: number, s: string) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+		writeString(view, 0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true);
+		writeString(view, 8, 'WAVE'); writeString(view, 12, 'fmt '); view.setUint32(16, 16, true);
+		view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+		view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+		writeString(view, 36, 'data'); view.setUint32(40, samples.length * 2, true);
+		for (let i = 0; i < samples.length; i++) {
+			const rawVal = samples[i];
+			const s = (rawVal !== undefined) ? rawVal : 0;
+			const clamped = Math.max(-1, Math.min(1, s));
+			view.setInt16(44 + i * 2, Math.floor(clamped * 0x7FFF), true);
 		}
 		return buffer;
 	}
 
-	async startLiveSession(micId: string) {
-		if (this.session && this.session.status !== 'idle') {
-			new Notice('A live session is already running.');
-			return;
-		}
-
-		const now = new Date();
-		const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
-		const sessionId = `live-${timestamp}`;
-
-		const adapter = this.app.vault.adapter as any;
-
-		const folderPath = this.app.vault.configDir + '/plugins/local-transcriber/tmp/';
-		const sessionDirPath = `${folderPath}${sessionId}/`;
-
-		if (!await adapter.exists(folderPath.replace(/\/$/, ''))) {
-			await adapter.mkdir(folderPath.replace(/\/$/, ''));
-		}
-		if (!await adapter.exists(sessionDirPath.replace(/\/$/, ''))) {
-			await adapter.mkdir(sessionDirPath.replace(/\/$/, ''));
-		}
-		if (!await adapter.exists(`${sessionDirPath}chunks/`.replace(/\/$/, ''))) {
-			await adapter.mkdir(`${sessionDirPath}chunks/`.replace(/\/$/, ''));
-		}
-
-		let userRawPath = undefined;
-		if (this.plugin.settings.liveKeepRawAudio) {
-			const outFolder = this.plugin.settings.liveOutputFolder || 'Live_Transcripts/';
-			const userFolder = outFolder.endsWith('/') ? outFolder : outFolder + '/';
-			if (!await adapter.exists(userFolder.replace(/\/$/, ''))) {
-				await this.app.vault.createFolder(userFolder.replace(/\/$/, ''));
-			}
-			userRawPath = `${userFolder}${sessionId}.wav`;
-		}
-
-		this.session = {
-			id: sessionId,
-			startedAt: timestamp,
-			status: 'recording',
-			micDeviceId: micId,
-			model: this.plugin.settings.liveModelSize || 'python-whisper::base.en',
-			language: this.plugin.settings.liveLanguage || 'en',
-			speakers: this.plugin.settings.liveDiarizationMode || 'finalize',
-			chunkSeconds: this.plugin.settings.liveChunkSeconds || 3,
-			overlapSeconds: this.plugin.settings.liveChunkOverlapSeconds || 0.75,
-			sessionDir: sessionDirPath,
-			rawAudioPath: userRawPath,
-			chunksProcessed: 0,
-			transcriptSegments: [],
-			nextSubtitleIndex: 1
-		};
-		this.failedChunks = [];
-
-		this.modal?.setRecordingState('recording');
-		this.modal?.log('Starting live transcription session...');
-
-		// ── NEW: start persistent server for faster-whisper backend ──────────────
-		const fullModelId = this.session!.model;
-		const backendStr  = fullModelId.split('::')[0];
-		const modelId     = fullModelId.split('::').slice(1).join('::');
-
-		if (backendStr === 'faster-whisper') {
-			this.modal?.log(`Loading model "${modelId}" — this takes 10–25 s on first use...`);
-			try {
-				this.whisperServer = new WhisperServerBackend(this.plugin);
-				await this.whisperServer.start(modelId, this.session!.language);
-				this.modal?.log('✅ Model ready. Recording will start now.');
-			} catch (err: any) {
-				this.modal?.log(`❌ Failed to start Whisper server: ${err.message}`);
-				this.session = null;
-				return;
-			}
-		}
-		// ─────────────────────────────────────────────────────────────────────────
-
-		await this.plugin.liveSessionManager.initSessionNote(this.session);
-
-		try {
-			this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: micId } });
-			this.audioContext = new AudioContext({ sampleRate: this.sampleRate });
-			this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
-
-			this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
-			this.chunkBufferSamples = [];
-			this.totalRecordedSamplesCount = 0;
-			const adapter = this.app.vault.adapter as any;
-			const basePath = adapter.getBasePath();
-			this.tempPcmPath = path.join(basePath, this.session.sessionDir, 'raw.pcm');
-			this.recordingOffset = 0;
-
-			const samplesPerChunk = this.session.chunkSeconds * this.sampleRate;
-			const overlapSamples = this.session.overlapSeconds * this.sampleRate;
-
-			this.processor.onaudioprocess = (e) => {
-				if (!this.session || this.session.status !== 'recording') return;
-
-				const inputData = e.inputBuffer.getChannelData(0);
-				const dataCopy = new Float32Array(inputData.length);
-				dataCopy.set(inputData);
-				this.chunkBufferSamples.push(dataCopy);
-				this.totalRecordedSamplesCount += dataCopy.length;
-
-				// Append to temp PCM file directly
-				if (this.tempPcmPath) {
-					const buf = Buffer.alloc(dataCopy.length * 4);
-					for (let i = 0; i < dataCopy.length; i++) {
-						buf.writeFloatLE(dataCopy[i] || 0, i * 4);
-					}
-					fs.appendFile(this.tempPcmPath, buf, (err: any) => {
-							if (err) console.error('Failed to append PCM chunk', err);
-						});
-				}
-
-				const totalSamplesSoFar = this.chunkBufferSamples.reduce((acc, val) => acc + val.length, 0);
-
-				if (totalSamplesSoFar - this.recordingOffset >= samplesPerChunk) {
-					this.extractAndQueueChunk(this.recordingOffset, samplesPerChunk);
-					this.recordingOffset += (samplesPerChunk - overlapSamples);
-				}
-
-				if (totalSamplesSoFar % this.sampleRate < inputData.length) {
-					this.updateModalProgress();
-				}
-			};
-
-			this.sourceNode.connect(this.processor);
-			this.processor.connect(this.audioContext.destination);
-
-			this.plugin.statusBarItem.setText('🎙 Dictating...');
-
-		} catch (err: any) {
-			this.modal?.log(`Failed to start recording: ${err.message}`);
-			this.session = null;
-		}
-	}
-
-	updateModalProgress(isFinalizing: boolean = false) {
+	updateProgress() {
 		if (!this.session || !this.modal) return;
-
-		const recordedSeconds = this.totalRecordedSamplesCount / this.sampleRate;
-
-		const effectiveChunkAdvance = this.session.chunkSeconds - this.session.overlapSeconds;
-		let transcribedSeconds = this.session.chunksProcessed * effectiveChunkAdvance;
-
-		if (transcribedSeconds > recordedSeconds) {
-			transcribedSeconds = recordedSeconds;
-		}
-
 		this.modal.setTranscriptionProgress(
-			recordedSeconds,
-			transcribedSeconds,
-			this.isProcessingChunk,
-			isFinalizing
+			this.totalRecordedSamplesCount / 16000,
+			this.session.chunksProcessed * 5,
+			this.isProcessingChunk
 		);
-	}
-
-	async extractAndQueueChunk(startOffset: number, length: number) {
-		if (!this.session) return;
-
-		const totalSamplesSoFar = this.chunkBufferSamples.reduce((acc, val) => acc + val.length, 0);
-		const flatSamples = new Float32Array(totalSamplesSoFar);
-		let offset = 0;
-		for (const arr of this.chunkBufferSamples) {
-			flatSamples.set(arr, offset);
-			offset += arr.length;
-		}
-
-		const chunkSamples = flatSamples.slice(startOffset, startOffset + length);
-
-		let discardSamples = startOffset;
-		while (this.chunkBufferSamples.length > 0) {
-			const first = this.chunkBufferSamples[0];
-			if (first && discardSamples >= first.length) {
-				discardSamples -= first.length;
-				this.chunkBufferSamples.shift();
-			} else {
-				break;
-			}
-		}
-		this.recordingOffset -= startOffset;
-
-		const isSilent = this.isSamplesSilent(chunkSamples, this.plugin.settings.liveSilenceGateDb || -40);
-		const chunkIndex = this.session.chunksProcessed + this.chunkQueue.length;
-
-		const adapter = this.app.vault.adapter as any;
-		const basePath = adapter.getBasePath();
-		const chunkFilename = `chunk-${chunkIndex.toString().padStart(5, '0')}.wav`;
-		const chunkFilePath = path.join(basePath, this.session.sessionDir, 'chunks', chunkFilename);
-
-		const wavBuffer = this.encodeWAV(chunkSamples, this.sampleRate);
-		fs.writeFileSync(chunkFilePath, Buffer.from(wavBuffer));
-
-		if (isSilent) {
-			this.modal?.log(`Chunk ${chunkIndex} below silence threshold, skipping transcription.`);
-			this.session.chunksProcessed++;
-		} else {
-			this.chunkQueue.push(chunkFilePath);
-
-			if (!this.isProcessingChunk) {
-				this.processNextChunk();
-			}
-		}
-
-		this.updateModalProgress();
-	}
-
-	pauseLiveSession() {
-		if (!this.session || this.session.status !== 'recording') return;
-		this.session.status = 'paused';
-		this.modal?.setRecordingState('paused');
-		this.modal?.log('Dictation paused.');
-		this.plugin.statusBarItem.setText('⏸ Dictation Paused');
-	}
-
-	async resumeLiveSession() {
-		if (!this.session || this.session.status !== 'paused') return;
-		this.session.status = 'recording';
-		this.modal?.setRecordingState('recording');
-		this.modal?.log('Dictation resumed.');
-		this.plugin.statusBarItem.setText('🎙 Dictating...');
-	}
-
-	async stopLiveSession() {
-		if (!this.session || this.session.status === 'idle') return;
-
-		this.session.status = 'stopping';
-		this.modal?.log('Stopping recording...');
-
-		if (this.processor) {
-			this.processor.disconnect();
-			this.processor = null;
-		}
-		if (this.sourceNode) {
-			this.sourceNode.disconnect();
-			this.sourceNode = null;
-		}
-		if (this.audioContext) {
-			await this.audioContext.close();
-			this.audioContext = null;
-		}
-		if (this.mediaStream) {
-			this.mediaStream.getTracks().forEach((t: any) => t.stop());
-			this.mediaStream = null;
-		}
-
-		if (this.chunkBufferSamples.length > 0) {
-			const totalSamplesSoFar = this.chunkBufferSamples.reduce((acc, val) => acc + val.length, 0);
-			if (totalSamplesSoFar - this.recordingOffset > this.sampleRate) {
-				await this.extractAndQueueChunk(this.recordingOffset, totalSamplesSoFar - this.recordingOffset);
-			}
-		}
-
-		this.modal?.setRecordingState('idle');
-		this.modal?.log('Live session stopping... waiting for transcription to finish.');
-		this.plugin.statusBarItem.setText('⏳ Finalizing dictation...');
-
-		while (this.chunkQueue.length > 0 || this.isProcessingChunk) {
-			this.updateModalProgress(true);
-			await new Promise(resolve => setTimeout(resolve, 500));
-		}
-
-		this.updateModalProgress(true);
-
-		const rawAudioPath = this.session.rawAudioPath;
-		const sessionDir = this.session.sessionDir;
-
-		this.modal?.log('Live session stopped.');
-		this.plugin.statusBarItem.setText('');
-
-		if (rawAudioPath && this.totalRecordedSamplesCount > 0 && this.tempPcmPath && fs.existsSync(this.tempPcmPath)) {
-			const { Modal, Setting } = require('obsidian');
-			const promptModal = new Modal(this.app);
-			promptModal.titleEl.setText('Keep recording?');
-			promptModal.contentEl.setText('Do you want to save the raw audio recording of this dictation?');
-			new Setting(promptModal.contentEl)
-				.addButton((btn: any) => btn.setButtonText('Delete').onClick(async () => {
-					promptModal.close();
-					await this.cleanupSessionTempDir(sessionDir);
-				}))
-				.addButton((btn: any) => btn.setButtonText('Keep').setCta().onClick(async () => {
-					promptModal.close();
-					try {
-						const pcmBuffer = fs.readFileSync(this.tempPcmPath!);
-						const samplesLength = pcmBuffer.length / 4;
-						const wavBuffer = new ArrayBuffer(44 + samplesLength * 2);
-						const view = new DataView(wavBuffer);
-						const writeString = (v: DataView, offset: number, string: string) => {
-							for (let i = 0; i < string.length; i++) {
-								v.setUint8(offset + i, string.charCodeAt(i));
-							}
-						};
-						writeString(view, 0, 'RIFF');
-						view.setUint32(4, 36 + samplesLength * 2, true);
-						writeString(view, 8, 'WAVE');
-						writeString(view, 12, 'fmt ');
-						view.setUint32(16, 16, true);
-						view.setUint16(20, 1, true); // PCM
-						view.setUint16(22, 1, true); // Mono
-						view.setUint32(24, this.sampleRate, true);
-						view.setUint32(28, this.sampleRate * 2, true);
-						view.setUint16(32, 2, true);
-						view.setUint16(34, 16, true);
-						writeString(view, 36, 'data');
-						view.setUint32(40, samplesLength * 2, true);
-						let offset = 44;
-						for (let i = 0; i < samplesLength; i++, offset += 2) {
-							const val = pcmBuffer.readFloatLE(i * 4);
-							const s = Math.max(-1, Math.min(1, val));
-							view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-						}
-
-						const adapter = this.app.vault.adapter as any;
-						const basePath = adapter.getBasePath();
-						const fullRawPath = path.join(basePath, rawAudioPath);
-
-						fs.writeFileSync(fullRawPath, Buffer.from(wavBuffer));
-
-						if (fs.existsSync(fullRawPath) && fs.statSync(fullRawPath).size > 44) {
-							new Notice(`Saved dictation audio to ${rawAudioPath}`);
-						} else {
-							new Notice(`Failed to save dictation audio properly: Output is empty.`);
-						}
-					} catch (e: any) {
-						new Notice(`Error saving raw audio: ${e.message}`);
-					} finally {
-						await this.cleanupSessionTempDir(sessionDir, [path.basename(rawAudioPath)]);
-					}
-				}));
-			promptModal.open();
-		} else {
-			await this.cleanupSessionTempDir(sessionDir);
-		}
-
-		// Shut down the persistent server if it was used
-		if (this.whisperServer) {
-			await this.whisperServer.shutdown();
-			this.whisperServer = null;
-		}
-
-		this.session = null;
-		this.chunkBufferSamples = [];
-		this.totalRecordedSamplesCount = 0;
-		this.tempPcmPath = null;
-		this.chunkQueue = [];
-		this.isProcessingChunk = false;
-	}
-
-	async cleanupSessionTempDir(sessionDir: string, keepFiles: string[] = []) {
-		const adapter = this.app.vault.adapter as any;
-		try {
-			if (await adapter.exists(sessionDir)) {
-				const list = await adapter.list(sessionDir);
-				for (const folder of list.folders) {
-					await adapter.rmdir(folder, true);
-				}
-				for (const file of list.files) {
-					if (!keepFiles.includes(path.basename(file))) {
-						await adapter.remove(file);
-					}
-				}
-				if (keepFiles.length === 0) {
-					await adapter.rmdir(sessionDir, true);
-				}
-			}
-		} catch (e) {
-			console.error("Cleanup failed", e);
-		}
-	}
-
-	async processNextChunk() {
-		if (this.chunkQueue.length === 0 || !this.session) {
-			this.isProcessingChunk = false;
-			return;
-		}
-
-		this.isProcessingChunk = true;
-		const chunkPath = this.chunkQueue.shift()!;
-
-		const chunkIndex = this.session.chunksProcessed;
-		const chunkStartTime = chunkIndex * (this.session.chunkSeconds - this.session.overlapSeconds);
-
-		try {
-			this.modal?.log(`Processing chunk ${chunkIndex}...`);
-			const result: any = await this.processChunk(chunkPath, chunkStartTime);
-
-			if (result && result.segments && result.segments.length > 0) {
-				const normalizedSegments = result.segments.map((s: any) => ({
-					...s,
-					start: s.start + chunkStartTime,
-					end: s.end + chunkStartTime
-				}));
-
-				const newSegments = this.plugin.liveSessionManager.deduplicateSegments(
-					this.session.transcriptSegments,
-					normalizedSegments
-				);
-
-				if (newSegments.length > 0) {
-					for (const seg of newSegments) {
-						this.session.transcriptSegments.push(seg);
-						this.insertLiveChunkAtCursor(seg.text);
-						this.modal?.setPreviewText(seg.text);
-					}
-				}
-			}
-		} catch (err: any) {
-			this.modal?.log(`Error processing chunk: ${err.message}`);
-			this.failedChunks.push(path.basename(chunkPath));
-		} finally {
-			if (this.session) {
-				this.session.chunksProcessed++;
-				this.updateModalProgress();
-				if (this.session.status !== 'idle') {
-					this.processNextChunk();
-				} else {
-					this.isProcessingChunk = false;
-				}
-			} else {
-				this.isProcessingChunk = false;
-			}
-		}
-	}
-
-	formatDictationInsertion(text: string, editor: any): string {
-		if (!text) return "";
-		let out = text.replace(/\s+/g, " ").trim();
-
-		const cursor = editor.getCursor();
-		const line = editor.getLine(cursor.line);
-		const before = cursor.ch > 0 ? line[cursor.ch - 1] : "";
-
-		const needsLeadingSpace =
-			out.length > 0 &&
-			before &&
-			!/\s/.test(before) &&
-			!/^[,.;:!?)]/.test(out);
-
-		if (needsLeadingSpace) out = " " + out;
-
-		const needsTrailingSpace =
-			out.length > 0 &&
-			!/\s$/.test(out);
-
-		if (needsTrailingSpace) out += " ";
-
-		return out;
 	}
 
 	insertLiveChunkAtCursor(text: string) {
@@ -587,84 +154,37 @@ export class TranscriptionLive {
 
 		const editor = view.editor;
 		const cursor = editor.getCursor();
+		let out = text.trim() + ' ';
+		editor.replaceRange(out, cursor);
+		
+		const lines = out.split('\n');
+		const lastLine = lines[lines.length - 1] || "";
+		editor.setCursor({
+			line: cursor.line + lines.length - 1,
+			ch: (lines.length === 1 ? cursor.ch : 0) + lastLine.length
+		});
+	}
 
-		const insertText = this.formatDictationInsertion(text, editor);
-		if (!insertText) return;
+	async stopRecording() {
+		if (this.processor) this.processor.disconnect();
+		if (this.whisperServer) await this.whisperServer.shutdown();
+		if (this.statusBarTimer) {
+			window.clearInterval(this.statusBarTimer);
+			this.statusBarTimer = null;
+		}
+		this.session = null;
+		this.modal?.setRecordingState('idle');
+		this.plugin.updateStatusBarIcon(false);
+	}
 
-		editor.replaceRange(insertText, cursor);
-
-		const lines = insertText.split('\n');
-		const lastLine = lines[lines.length - 1] || '';
-		if (lines.length === 1) {
-			editor.setCursor({ line: cursor.line, ch: cursor.ch + lastLine.length });
-		} else {
-			editor.setCursor({
-				line: cursor.line + lines.length - 1,
-				ch: lastLine.length
-			});
+	pauseRecording() {
+		if (this.session) {
+			this.session.status = 'paused';
+			this.modal?.setRecordingState('paused');
 		}
 	}
 
-	async processChunk(chunkPath: string, chunkStart: number): Promise<unknown> {
-		if (!this.session) throw new Error("No session");
-
-		const fullModelId = this.session.model;
-		const backendStr = fullModelId.split('::')[0];
-		const modelId = fullModelId.split('::').slice(1).join('::');
-
-		const modelsDir = this.plugin.pythonEnv.getModelsDir();
-
-		const onEvent = (_msg: any) => {};
-
-		// ── Faster-Whisper: route through persistent server ────────────────────
-		if (backendStr === 'faster-whisper') {
-			if (!this.whisperServer?.ready) {
-				// Server should be ready by now; if not, surface the error clearly
-				throw new Error(
-					'Whisper server is not ready. This should not happen — ' +
-					'please stop and restart the live session.'
-				);
-			}
-
-			const result = await this.whisperServer.transcribeChunk(
-				{ chunkPath, chunkStart, sessionId: this.session.id },
-				onEvent
-			);
-
-			// Stage 2: optional Ollama cleanup pass
-			const cleanupModel = (this.plugin.settings as any).liveOllamaCleanupModel ?? '';
-			if (cleanupModel && cleanupModel !== 'off' && result.segments && result.segments.length > 0) {
-				try {
-					const ollamaBackend = new OllamaLiveBackend(this.plugin);
-					const cleanupOptions = { chunkPath, modelId: cleanupModel, chunkStart, sessionId: this.session.id, rawSegments: result.segments, language: this.session.language };
-					const cleaned = await ollamaBackend.transcribeChunk(cleanupOptions as any, onEvent);
-					return { segments: cleaned.segments };
-				} catch {
-					// Ollama cleanup failed — fall through to raw segments
-				}
-			}
-
-			return result;
-		}
-
-		// ── Other backends: existing per-spawn logic (unchanged) ───────────────
-		const options = {
-			chunkPath,
-			modelId,
-			language: this.session.language,
-			modelsDir,
-			chunkStart,
-			sessionId: this.session.id
-		};
-
-		if (backendStr === 'python-whisper') {
-			const backend = new PythonWhisperLiveBackend(this.plugin);
-			return backend.transcribeChunk(options, onEvent);
-		} else if (backendStr === 'ollama') {
-			const backend = new OllamaLiveBackend(this.plugin);
-			return backend.transcribeChunk(options, onEvent);
-		}
-
-		throw new Error(`Unknown backend: ${backendStr}`);
+	isRecording(): boolean { 
+		return this.session !== null && this.session.status === 'recording'; 
 	}
 }

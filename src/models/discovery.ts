@@ -1,5 +1,7 @@
 import { TranscriptionModelDescriptor, ModelRegistry } from './registry';
 import { OllamaEnvironment } from '../environment/ollama';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export class ModelDiscovery {
 
@@ -16,10 +18,10 @@ export class ModelDiscovery {
         for (const id of ModelDiscovery.BUILTIN_WHISPER_MODELS) {
             this.registry.register({
                 id: id,
-                label: `${id} (Python Whisper)`,
-                backend: "python-whisper",
+                label: `${id} (Faster Whisper)`,
+                backend: "faster-whisper",
                 modeSupport: ["file", "live"],
-                installed: true, // We assume it's downloaded on demand by python
+                installed: true,
                 source: "builtin"
             });
         }
@@ -27,6 +29,19 @@ export class ModelDiscovery {
 
     async discoverCustomWhisper(customModels: string) {
         const models = customModels.split('\n').map(m => m.trim()).filter(m => m.length > 0);
+
+        // Auto-scan local models dir
+        const mDir = (window as any).localTranscriberModelsDir;
+        if (fs.existsSync(mDir)) {
+            const dirs = fs.readdirSync(mDir);
+            for (const d of dirs) {
+                if (d.startsWith("models--")) {
+                    const modelName = d.replace("models--", "").replace(/--/g, "/");
+                    if (!models.includes(modelName)) models.push(modelName);
+                }
+            }
+        }
+
         for (const id of models) {
             // Only add if not already a builtin
             if (!ModelDiscovery.BUILTIN_WHISPER_MODELS.includes(id)) {

@@ -1,7 +1,7 @@
 export interface TranscriptionModelDescriptor {
   id: string;              // e.g. "base.en" or "karanchopda333/whisper"
   label: string;           // user-facing name
-  backend: "python-whisper" | "ollama";
+  backend: "python-whisper" | "ollama" | "faster-whisper";
   modeSupport: ("file" | "live")[];
   languageSupport?: string[];
   installed: boolean;
@@ -35,7 +35,7 @@ export class ModelRegistry {
         return this.getAllModels().filter(m => m.modeSupport.includes(mode));
     }
 
-    getModel(backend: "python-whisper" | "ollama", id: string): TranscriptionModelDescriptor | undefined {
+    getModel(backend: "python-whisper" | "ollama" | "faster-whisper", id: string): TranscriptionModelDescriptor | undefined {
         return this.models.get(`${backend}::${id}`);
     }
 
