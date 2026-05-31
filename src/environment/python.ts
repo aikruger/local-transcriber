@@ -157,4 +157,41 @@ export class PythonEnvironment {
 			});
 		});
 	}
+
+	async downloadModel(modelId: string, logger: { log: (msg: string) => void }): Promise<void> {
+		return new Promise((resolve, reject) => {
+			const adapter: any = this.app.vault.adapter;
+			const vaultPath = adapter && adapter.getBasePath ? adapter.getBasePath() : '';
+			const pluginDir = path.join(vaultPath, this.app.vault.configDir, 'plugins', 'local-transcriber');
+			const bootstrapScript = path.join(pluginDir, 'local_transcriber', 'bootstrap.py');
+			const modelsDir = this.getModelsDir();
+
+			logger.log(`Initiating download for model: ${modelId}...`);
+
+			const pyPath = this.getPythonExecutable();
+			const child = spawn(pyPath, [bootstrapScript, '--models-dir', modelsDir, '--model', modelId]);
+
+			child.stderr.on('data', (data) => {
+				logger.log(`[stderr] ${data.toString()}`);
+			});
+
+			child.stdout.on('data', (data) => {
+				const lines = data.toString().split('\n').filter((l: string) => l.trim());
+				for (const line of lines) {
+					try {
+						const msg = JSON.parse(line);
+						if (msg.status === 'downloading_model') logger.log(`Downloading: ${msg.model}...`);
+						else if (msg.status === 'done') logger.log('Download complete.');
+					} catch (e) {
+						logger.log(line);
+					}
+				}
+			});
+
+			child.on('close', (code) => {
+				if (code === 0) resolve();
+				else reject(new Error(`Download failed with code ${code}`));
+			});
+		});
+	}
 }

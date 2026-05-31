@@ -5,6 +5,10 @@ import json
 import argparse
 import tempfile
 import time
+import warnings
+
+# Silence huggingface symlink warnings which occur on some Windows filesystems
+warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub")
 
 def emit(data: dict):
     print(json.dumps(data), flush=True)

@@ -27,6 +27,7 @@ def pip_install(package: str):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--models-dir", required=True)
+    parser.add_argument("--model", default=None, help="Specific model to download")
     args = parser.parse_args()
 
     models_dir = args.models_dir
@@ -36,24 +37,27 @@ def main():
     for pkg in ["faster-whisper", "pyannote.audio", "ffmpeg-python"]:
         pip_install(pkg)
 
-    # Pre-download tiny (live default) and base (quality option)
-    emit({"status": "downloading_model", "model": "faster-whisper tiny"})
-    try:
-        from faster_whisper import WhisperModel
-        WhisperModel("tiny", device="cpu", compute_type="int8",
-                     download_root=models_dir)
-    except Exception as e:
-        print(f"Failed to download tiny model: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    emit({"status": "downloading_model", "model": "faster-whisper base"})
-    try:
-        from faster_whisper import WhisperModel
-        WhisperModel("base", device="cpu", compute_type="int8",
-                     download_root=models_dir)
-    except Exception as e:
-        print(f"Failed to download base model: {e}", file=sys.stderr)
-        sys.exit(2)
+    # If a specific model is requested, download just that one
+    if args.model:
+        emit({"status": "downloading_model", "model": args.model})
+        try:
+            from faster_whisper import WhisperModel
+            WhisperModel(args.model, device="cpu", compute_type="int8",
+                         download_root=models_dir)
+        except Exception as e:
+            print(f"Failed to download {args.model} model: {e}", file=sys.stderr)
+            sys.exit(2)
+    else:
+        # Fallback: Pre-download tiny (live default) and base (quality option) if no model specified
+        for model in ["tiny", "base"]:
+            emit({"status": "downloading_model", "model": model})
+            try:
+                from faster_whisper import WhisperModel
+                WhisperModel(model, device="cpu", compute_type="int8",
+                             download_root=models_dir)
+            except Exception as e:
+                print(f"Failed to download {model} model: {e}", file=sys.stderr)
+                sys.exit(2)
 
     emit({"status": "done"})
     sys.exit(0)

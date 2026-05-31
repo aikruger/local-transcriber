@@ -62,19 +62,55 @@ import { App, Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
                                         await this.transcriptionLive.stopRecording();
                                         this.updateStatusBarIcon(false);                                                 
                                 } else {                                                                                 
-                                        const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_LIVE_DICTATION);     
-                                        const activeLeaf = leaves[0];                                                    
+                                        const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_LIVE_DICTATION);
+                                        const activeLeaf = leaves[0];
                                         if (activeLeaf && activeLeaf.view) {
                                                 const view = activeLeaf.view as LiveDictationView;
-                                                await this.transcriptionLive.handleTranscribeLive(view);                 
+
+                                                // ✅ Guard: check if the view is fully initialised
+                                                if (typeof view.onStartClick !== 'function') {
+                                                    console.error("[LocalTranscriber] LiveDictationView is not fully initialised. onStartClick missing.", view);
+                                                    new Notice("Live Dictation panel is not ready. Try closing and reopening it.");
+                                                    return;
+                                                }
+
+                                                console.log("[LocalTranscriber] View is ready, calling handleTranscribeLive");
+                                                await this.transcriptionLive.handleTranscribeLive(view);
                                                 await this.transcriptionLive.startRecording(this.settings.liveMicDeviceId || 'default');
-                                                this.updateStatusBarIcon(true);                                          
+                                                this.updateStatusBarIcon(true);
                                         } else {
-                                                new Notice("Please open the Live Dictation sidebar first (via Ribbon icon).");                                                                                                                    
-                                        }                                                                                
-                                }                                                                                        
+                                                new Notice("Please open the Live Dictation sidebar first (via Ribbon icon).");
+                                        }
+                                }
                         }
-                });                                                                                                      
+                });
+                
+                this.addCommand({
+                        id: 'transcribe-active-file',
+                        name: 'Transcribe audio/video file',
+                        checkCallback: (checking: boolean) => {
+                                const file = this.app.workspace.getActiveFile();
+                                if (file && ['mp3', 'wav', 'webm', 'mp4', 'm4a', 'aac', 'flac'].includes(file.extension)) {
+                                        if (!checking) {
+                                                this.transcriptionFile.handleTranscribe(file);
+                                        }
+                                        return true;
+                                }
+                                return false;
+                        }
+                });
+
+                this.addCommand({
+                        id: 'transcribe-selected-file',
+                        name: 'Transcribe selected file...',
+                        callback: async () => {
+                                // Simple file picker using Obsidian's internal suggest logic isn't directly exposed 
+                                // without a modal, but we can list them or let the user active file-select.
+                                // For now, we will notify the user to open the file first.
+                                new Notice("Please open the audio/video file you wish to transcribe first.");
+                        }
+                });
+
                                                                                                                          
                 this.addSettingTab(new LocalTranscriberSettingTab(this.app, this));
         }                                                                                                                

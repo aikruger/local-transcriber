@@ -54,9 +54,17 @@ export class WhisperServerBackend {
     ];
     if (modelsDir) args.push("--models-dir", modelsDir);
 
+    // Patch: Ensure environment variables for cache are passed to the sub-process
+    const env = { 
+        ...process.env, 
+        "HF_HUB_DISABLE_SYMLINKS_WARNING": "1",
+        "HF_HOME": this.plugin.pythonEnv.getModelsDir() || process.env.USERPROFILE + "\\.cache\\huggingface"
+    };
+
     return new Promise((resolve, reject) => {
       const proc = child_process.spawn(pythonPath, args, {
         stdio: ["pipe", "pipe", "pipe"],
+        env: env // Apply the patched environment
       });
 
       this.process = proc;
@@ -95,13 +103,13 @@ export class WhisperServerBackend {
       };
       this.rl.on("line", onFirstReady);
 
-      // Safety timeout — if no ready in 60 s, something went wrong
+      // Safety timeout — if no ready in 120 s, something went wrong (model load time for medium)
       setTimeout(() => {
         if (!this.isReady) {
           reject(new Error("Whisper server timed out waiting for ready signal"));
           this.shutdown();
         }
-      }, 60_000);
+      }, 120_000);
     });
   }
 

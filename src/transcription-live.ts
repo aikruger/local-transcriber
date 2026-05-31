@@ -29,10 +29,26 @@ export class TranscriptionLive {
 	}
 
 	async handleTranscribeLive(view: LiveDictationView) {
+		console.log("[TranscriptionLive] handleTranscribeLive called for:", view?.constructor?.name);
 		this.modal = view;
-		this.modal.onStartClick(async (micId: string) => await this.startRecording(micId));
-		this.modal.onPauseClick(() => this.pauseRecording());
-		this.modal.onStopClick(async () => await this.stopRecording());
+
+		if (typeof this.modal.onStartClick !== 'function') {
+			console.error("[TranscriptionLive] onStartClick is not a function. View may not be fully rendered.", this.modal);
+			throw new Error("LiveDictationView is not ready: onStartClick is missing");
+		}
+
+		this.modal.onStartClick(async (micId: string) => {
+			console.log("[TranscriptionLive] Start clicked with micId:", micId);
+			await this.startRecording(micId);
+		});
+		this.modal.onPauseClick(() => {
+			console.log("[TranscriptionLive] Pause clicked");
+			this.pauseRecording();
+		});
+		this.modal.onStopClick(async () => {
+			console.log("[TranscriptionLive] Stop clicked");
+			await this.stopRecording();
+		});
 	}
 
 	async startRecording(micId: string) {
