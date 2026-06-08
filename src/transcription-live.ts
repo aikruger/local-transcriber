@@ -22,6 +22,7 @@ export class TranscriptionLive {
 	private isProcessingChunk: boolean = false;
 	private totalRecordedSamplesCount: number = 0;
 	private statusBarTimer: number | null = null;
+	private totalTranscribedSeconds: number = 0;
 
 	constructor(plugin: LocalTranscriberPlugin) {
 		this.plugin = plugin;
@@ -58,8 +59,24 @@ export class TranscriptionLive {
 		const [backendStr, modelName] = this.session!.model.split('::');
 		if (backendStr === 'faster-whisper') {
 			this.whisperServer = new WhisperServerBackend(this.plugin);
-			await this.whisperServer.start(modelName || "base", this.session!.language);
+			try {
+				console.log(`[TranscriptionLive] Starting WhisperServer with model="${modelName || 'base'}"...`);
+				await this.whisperServer.start(modelName || "base", this.session!.language);
+				console.log(`[TranscriptionLive] WhisperServer started successfully`);
+			} catch (err: any) {
+				console.error(`[TranscriptionLive] WhisperServer failed to start: ${err.message}`);
+				// Clean up the partially-started session
+				this.session = null;
+				this.whisperServer = null;
+				this.modal?.setRecordingState('idle');
+				// Show the user a clear error notice
+				const { Notice } = require('obsidian');
+				new Notice(`Transcription failed to start: ${err.message}`, 8000);
+				return; // Do NOT continue to set up audio capture
+			}
 		}
+
+		this.totalTranscribedSeconds = 0;
 
 		this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: micId } });
 		this.audioContext = new AudioContext({ sampleRate: 16000 });
@@ -73,7 +90,16 @@ export class TranscriptionLive {
 			this.chunkBufferSamples.push(new Float32Array(inputData));
 			this.totalRecordedSamplesCount += inputData.length;
 			if (this.chunkBufferSamples.length > (16000 * 5) / 4096) {
-				this.extractChunk();
+				// Guard: only extract if server is actually ready
+				if (!this.whisperServer?.ready) {
+					console.warn('[TranscriptionLive] onaudioprocess — skipping chunk, server not ready');
+					this.chunkBufferSamples = []; // discard buffered audio
+					return;
+				}
+				// Catch and log async errors so they don't leak as uncaught rejections
+				this.extractChunk().catch(err => {
+					console.error('[TranscriptionLive] extractChunk failed:', err.message);
+				});
 			}
 		};
 
@@ -100,14 +126,33 @@ export class TranscriptionLive {
 		for (const buf of this.chunkBufferSamples) { samples.set(buf, offset); offset += buf.length; }
 		this.chunkBufferSamples = [];
 
+		const rms = Math.sqrt(samples.reduce((sum, s) => sum + s * s, 0) / samples.length);
+		const minDurationSecs = 1.0;
+		const chunkDurationSecs = samples.length / 16000;
+		console.log(`[TranscriptionLive] Chunk energy RMS=${rms.toFixed(5)}, duration=${chunkDurationSecs.toFixed(2)}s`);
+
+		if (chunkDurationSecs < minDurationSecs || rms < 0.005) {
+			console.warn(`[TranscriptionLive] Skipping chunk — too short (${chunkDurationSecs.toFixed(2)}s) or silent (RMS=${rms.toFixed(5)})`);
+			this.isProcessingChunk = false;
+			return;
+		}
+
 		const adapter = this.app.vault.adapter as any;
 		const chunkPath = path.join(adapter.getBasePath(), this.session.sessionDir, `chunks/chunk-${Date.now()}.wav`);
 		fs.writeFileSync(chunkPath, Buffer.from(this.encodeWAV(samples, 16000)));
 
 		try {
-			const result: any = await this.whisperServer!.transcribeChunk({ chunkPath, chunkStart: 0, sessionId: this.session.id }, (event) => {
-				if (event.type === 'segment') this.modal?.setPreviewText(event.text);
-			});
+			const chunkStartSeconds = this.totalTranscribedSeconds;
+			const chunkDurationSeconds = samples.length / 16000;
+			this.totalTranscribedSeconds += chunkDurationSeconds;
+			console.log(`[TranscriptionLive] Sending chunk: start=${chunkStartSeconds.toFixed(2)}s, duration=${chunkDurationSeconds.toFixed(2)}s, samples=${samples.length}`);
+
+			const result: any = await this.whisperServer!.transcribeChunk(
+				{ chunkPath, chunkStart: chunkStartSeconds, sessionId: this.session.id },
+				(event) => {
+					if (event.type === 'segment') this.modal?.setPreviewText(event.text);
+				}
+			);
 			if (result?.segments) {
 				for (const seg of result.segments) {
 					this.insertLiveChunkAtCursor(seg.text);

@@ -55,9 +55,57 @@ export class PythonEnvironment {
 	}
 
 	getPythonExecutable(): string {
-		const resolved = this.plugin.settings.pythonPath || (os.platform() === 'win32' ? 'python' : 'python3');
-		console.log(`[PythonEnvironment] getPythonExecutable() → "${resolved}"`);
-		return resolved;
+		const stored = this.plugin.settings.pythonPath;
+		// Guard: reject venv paths that are not the plugin's own environment
+		// The hermes-agent venv is a known bad path to watch for
+		if (stored && stored.trim() !== '') {
+			const lowerPath = stored.toLowerCase();
+			// If the stored path looks like an external agent/tool venv, ignore it
+			const isSuspiciousVenv = lowerPath.includes('hermes') ||
+									  lowerPath.includes('copilot') ||
+									  lowerPath.includes('agent') && lowerPath.includes('venv');
+			if (isSuspiciousVenv) {
+				console.warn(`[PythonEnvironment] getPythonExecutable() — stored path looks like an external venv, ignoring: "${stored}"`);
+				// Clear the bad path
+				this.plugin.settings.pythonPath = '';
+				// Don't await here — fire and forget
+				this.plugin.saveSettings().catch(e => console.error('[PythonEnvironment] Failed to clear bad pythonPath:', e));
+			} else {
+				console.log(`[PythonEnvironment] getPythonExecutable() → "${stored}"`);
+				return stored;
+			}
+		}
+		const fallback = os.platform() === 'win32' ? 'python' : 'python3';
+		console.log(`[PythonEnvironment] getPythonExecutable() → "${fallback}" (fallback)`);
+		return fallback;
+	}
+
+	async resolvePythonExecutable(): Promise<string> {
+		const current = this.getPythonExecutable();
+		// If already absolute, return as-is
+		if (path.isAbsolute(current)) {
+			console.log(`[PythonEnvironment] resolvePythonExecutable() — already absolute: "${current}"`);
+			return current;
+		}
+		// Resolve 'python' or 'python3' to an absolute path
+		const whichCmd = os.platform() === 'win32' ? 'where' : 'which';
+		return new Promise((resolve) => {
+			execFile(whichCmd, [current], (error, stdout) => {
+				if (error || !stdout.trim()) {
+					console.warn(`[PythonEnvironment] Could not resolve "${current}" via ${whichCmd}, using as-is`);
+					resolve(current);
+				} else {
+					// 'where' on Windows returns multiple lines; take the first non-empty one
+					// Skip Microsoft Store stubs (WindowsApps)
+					const lines = stdout.trim().split(/\r?\n/)
+						.map(l => l.trim())
+						.filter(l => l.length > 0 && !l.toLowerCase().includes('windowsapps'));
+					const resolved = lines[0] || current;
+					console.log(`[PythonEnvironment] resolvePythonExecutable() "${current}" → "${resolved}"`);
+					resolve(resolved);
+				}
+			});
+		});
 	}
 
 	async verifyFasterWhisper(): Promise<boolean> {
@@ -119,6 +167,13 @@ export class PythonEnvironment {
 	}
 
 	async bootstrapPython(logger: { log: (msg: string) => void }): Promise<void> {
+		// Resolve the absolute Python path BEFORE spawning bootstrap
+		const pyPath = await this.resolvePythonExecutable();
+		console.log(`[PythonEnvironment] bootstrapPython() — using Python: "${pyPath}"`);
+		// Save it immediately so all future calls use the same interpreter
+		this.plugin.settings.pythonPath = pyPath;
+		await this.plugin.saveSettings();
+
 		return new Promise((resolve, reject) => {
 			const adapter: any = this.app.vault.adapter;
 			const vaultPath = adapter && adapter.getBasePath ? adapter.getBasePath() : '';
@@ -138,7 +193,6 @@ export class PythonEnvironment {
 				fs.mkdirSync(modelsDir, { recursive: true });
 			}
 
-			const pyPath = this.getPythonExecutable();
 			const child = spawn(pyPath, [bootstrapScript, '--models-dir', modelsDir]);
 
 			let stderrOutput = '';

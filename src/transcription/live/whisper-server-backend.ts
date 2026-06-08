@@ -60,66 +60,87 @@ export class WhisperServerBackend {
     const modelsDir  = this.plugin.pythonEnv.getModelsDir();
 
     const args = [
-      scriptPath,
-      "--model",       modelId,
-      "--language",    language || "en",
-      "--compute-type","int8",
-      "--device",      "cpu",
+        scriptPath,
+        "--model",        modelId,
+        "--language",     language || "en",
+        "--compute-type", "int8",
+        "--device",       "cpu",
     ];
     if (modelsDir) args.push("--models-dir", modelsDir);
 
+    console.log(`[WhisperServer] Spawning: "${pythonPath}" ${args.join(' ')}`);
+
     return new Promise((resolve, reject) => {
-      const proc = child_process.spawn(pythonPath, args, {
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+        // *** CRITICAL: track whether startup has settled ***
+        let startupSettled = false;
 
-      this.process = proc;
+        const proc = child_process.spawn(pythonPath, args, {
+            stdio: ["pipe", "pipe", "pipe"],
+        });
 
-      // Line-by-line reader on stdout
-      this.rl = readline.createInterface({ input: proc.stdout! });
+        this.process = proc;
+        this.rl = readline.createInterface({ input: proc.stdout! });
+        this.rl.on("line", (line) => this.handleLine(line));
 
-      this.rl.on("line", (line) => this.handleLine(line));
+        proc.stderr!.on("data", (chunk) => {
+            const msg = chunk.toString();
+            console.error(`[WhisperServer] Python stderr: ${msg}`);
+            // Reject startup immediately on import errors
+            if (!startupSettled && msg.includes("No module named")) {
+                startupSettled = true;
+                reject(new Error(`Model load failed: ${msg.trim()}`));
+            }
+        });
 
-      proc.stderr!.on("data", (chunk) => {
-        const msg = chunk.toString();
-        console.error(`[WhisperServer] Python stderr: ${msg}`);
-        // If stderr contains the module error, reject immediately so user gets a clear notice
-        if (msg.includes("No module named") && !this.isReady) {
-            reject(new Error(`Model load failed: ${msg.trim()}`));
-        }
-      });
+        // *** FIX: exit handler now rejects the STARTUP promise if not yet settled ***
+        proc.on("exit", (code, signal) => {
+            console.log(`[WhisperServer] Process exited — code=${code}, signal=${signal}, startupSettled=${startupSettled}, isReady=${this.isReady}`);
+            this.isReady = false;
+            if (!startupSettled) {
+                // Process died before emitting "ready" — reject the startup promise
+                startupSettled = true;
+                reject(new Error(`Whisper server process exited (code=${code}, signal=${signal}) before becoming ready. Check Python stderr above for details.`));
+            } else if (this.currentReject) {
+                // Process died during an active transcription request
+                this.currentReject(new Error(`Server exited with code ${code}`));
+                this.currentReject = null;
+                this.currentResolve = null;
+            }
+        });
 
-      proc.on("exit", (code) => {
-        this.isReady = false;
-        if (this.currentReject) {
-          this.currentReject(new Error(`Server exited with code ${code}`));
-          this.currentReject = null;
-          this.currentResolve = null;
-        }
-      });
+        // Wait for first "ready" message
+        const onFirstReady = (line: string) => {
+            try {
+                const msg = JSON.parse(line);
+                console.log(`[WhisperServer] Startup message received: ${JSON.stringify(msg)}`);
+                if (msg.type === "ready") {
+                    startupSettled = true;
+                    this.isReady = true;
+                    this.rl!.off("line", onFirstReady);
+                    console.log(`[WhisperServer] Server is ready — model loaded`);
+                    resolve();
+                } else if (msg.type === "error") {
+                    if (!startupSettled) {
+                        startupSettled = true;
+                        reject(new Error(msg.error));
+                    }
+                }
+            } catch (_) {}
+        };
+        this.rl.on("line", onFirstReady);
 
-      // Wait for first "ready" message
-      const onFirstReady = (line: string) => {
-        try {
-          const msg = JSON.parse(line);
-          if (msg.type === "ready") {
-            this.isReady = true;
-            this.rl!.off("line", onFirstReady);
-            resolve();
-          } else if (msg.type === "error") {
-            reject(new Error(msg.error));
-          }
-        } catch (_) {}
-      };
-      this.rl.on("line", onFirstReady);
+        // Safety timeout
+        const startupTimeout = setTimeout(() => {
+            if (!startupSettled) {
+                startupSettled = true;
+                console.error(`[WhisperServer] Startup timed out after 60s`);
+                reject(new Error("Whisper server timed out waiting for ready signal"));
+                this.shutdown();
+            }
+        }, 60_000);
 
-      // Safety timeout — if no ready in 60 s, something went wrong
-      setTimeout(() => {
-        if (!this.isReady) {
-          reject(new Error("Whisper server timed out waiting for ready signal"));
-          this.shutdown();
-        }
-      }, 60_000);
+        // Clear timeout if process exits before it fires
+        proc.on("exit", () => clearTimeout(startupTimeout));
     });
   }
 
