@@ -41,6 +41,20 @@ export class WhisperServerBackend {
   async start(modelId: string, language: string): Promise<void> {
     if (this.isReady) return;
 
+    // Pre-flight check: confirm faster_whisper is importable by this Python
+    const isFwAvailable = await this.plugin.pythonEnv.verifyFasterWhisper();
+    if (!isFwAvailable) {
+        const pyPath = this.plugin.pythonEnv.getPythonExecutable();
+        console.error(`[WhisperServer] faster_whisper not found in Python at: ${pyPath}`);
+        throw new Error(
+            `Model load failed: No module named 'faster_whisper'.\n` +
+            `The Python executable "${pyPath}" does not have faster_whisper installed.\n` +
+            `Please run Setup again from the plugin settings, or manually run:\n` +
+            `"${pyPath}" -m pip install faster-whisper`
+        );
+    }
+    console.log(`[WhisperServer] Pre-flight passed — faster_whisper available`);
+
     const pythonPath = this.plugin.pythonEnv.getPythonExecutable();
     const scriptPath = this.resolveServerScript();
     const modelsDir  = this.plugin.pythonEnv.getModelsDir();
@@ -67,8 +81,12 @@ export class WhisperServerBackend {
       this.rl.on("line", (line) => this.handleLine(line));
 
       proc.stderr!.on("data", (chunk) => {
-        // Python stack traces come here — log but don't crash
-        console.error("[whisper-server stderr]", chunk.toString());
+        const msg = chunk.toString();
+        console.error(`[WhisperServer] Python stderr: ${msg}`);
+        // If stderr contains the module error, reject immediately so user gets a clear notice
+        if (msg.includes("No module named") && !this.isReady) {
+            reject(new Error(`Model load failed: ${msg.trim()}`));
+        }
       });
 
       proc.on("exit", (code) => {

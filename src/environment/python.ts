@@ -55,7 +55,25 @@ export class PythonEnvironment {
 	}
 
 	getPythonExecutable(): string {
-		return this.plugin.settings.pythonPath || (os.platform() === 'win32' ? 'python' : 'python3');
+		const resolved = this.plugin.settings.pythonPath || (os.platform() === 'win32' ? 'python' : 'python3');
+		console.log(`[PythonEnvironment] getPythonExecutable() → "${resolved}"`);
+		return resolved;
+	}
+
+	async verifyFasterWhisper(): Promise<boolean> {
+		return new Promise((resolve) => {
+			const pyPath = this.getPythonExecutable();
+			console.log(`[PythonEnvironment] verifyFasterWhisper() — testing import with: ${pyPath}`);
+			execFile(pyPath, ['-c', 'import faster_whisper; print("ok")'], (error, stdout, stderr) => {
+				if (error || !stdout.trim().startsWith('ok')) {
+					console.error(`[PythonEnvironment] faster_whisper import FAILED. stderr: ${stderr}`);
+					resolve(false);
+				} else {
+					console.log(`[PythonEnvironment] faster_whisper import verified OK`);
+					resolve(true);
+				}
+			});
+		});
 	}
 
 	async hasPython(): Promise<boolean> {
@@ -132,14 +150,23 @@ export class PythonEnvironment {
 				}
 			});
 
-			child.stdout.on('data', (data) => {
+			child.stdout.on('data', async (data) => {
 				const lines = data.toString().split('\n').filter((l: string) => l.trim());
 				for (const line of lines) {
 					try {
 						const msg = JSON.parse(line);
 						if (msg.status === 'installing') logger.log(`Installing: ${msg.package}...`);
 						else if (msg.status === 'downloading_model') logger.log(`Downloading model: ${msg.model}...`);
-						else if (msg.status === 'done') logger.log('Bootstrap complete.');
+						else if (msg.status === 'done') {
+							logger.log('Bootstrap complete.');
+							// Persist the exact Python executable that ran bootstrap
+							if (msg.python_executable) {
+								console.log(`[PythonEnvironment] Bootstrap confirmed Python path: ${msg.python_executable}`);
+								this.plugin.settings.pythonPath = msg.python_executable;
+								await this.plugin.saveSettings();
+								logger.log(`Using Python: ${msg.python_executable}`);
+							}
+						}
 					} catch (e) {
 						logger.log(line);
 					}
