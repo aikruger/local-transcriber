@@ -24,7 +24,7 @@ export class WhisperServerBackend {
   private plugin: LocalTranscriberPlugin;
   private process: child_process.ChildProcess | null = null;
   private rl: readline.Interface | null = null;
-  private isReady: boolean = false;
+  public isReady: boolean = false;
   private currentResolve: ((result: TranscribeResult) => void) | null = null;
   private currentReject: ((err: Error) => void) | null = null;
   private currentSegments: TranscribeResult["segments"] = [];
@@ -41,21 +41,20 @@ export class WhisperServerBackend {
   async start(modelId: string, language: string): Promise<void> {
     if (this.isReady) return;
 
+    // Resolve the real Python before any spawning
+    const pyPath = await this.plugin.pythonEnv.findSystemPython();
+    console.log(`[WhisperServer] Using Python: "${pyPath}"`);
+
     // Pre-flight check: confirm faster_whisper is importable by this Python
     const isFwAvailable = await this.plugin.pythonEnv.verifyFasterWhisper();
     if (!isFwAvailable) {
-        const pyPath = this.plugin.pythonEnv.getPythonExecutable();
-        console.error(`[WhisperServer] faster_whisper not found in Python at: ${pyPath}`);
         throw new Error(
-            `Model load failed: No module named 'faster_whisper'.\n` +
-            `The Python executable "${pyPath}" does not have faster_whisper installed.\n` +
-            `Please run Setup again from the plugin settings, or manually run:\n` +
-            `"${pyPath}" -m pip install faster-whisper`
+            `faster_whisper is not installed in the Python found at "${pyPath}".\n` +
+            `Please run Setup again from plugin settings.`
         );
     }
     console.log(`[WhisperServer] Pre-flight passed — faster_whisper available`);
 
-    const pythonPath = this.plugin.pythonEnv.getPythonExecutable();
     const scriptPath = this.resolveServerScript();
     const modelsDir  = this.plugin.pythonEnv.getModelsDir();
 
@@ -68,13 +67,14 @@ export class WhisperServerBackend {
     ];
     if (modelsDir) args.push("--models-dir", modelsDir);
 
-    console.log(`[WhisperServer] Spawning: "${pythonPath}" ${args.join(' ')}`);
+    console.log(`[WhisperServer] Spawning: "${pyPath}" ${args.join(' ')}`);
 
     return new Promise((resolve, reject) => {
         // *** CRITICAL: track whether startup has settled ***
         let startupSettled = false;
+        let startupReject: ((err: Error) => void) | null = reject;
 
-        const proc = child_process.spawn(pythonPath, args, {
+        const proc = child_process.spawn(pyPath, args, {
             stdio: ["pipe", "pipe", "pipe"],
         });
 
@@ -96,13 +96,14 @@ export class WhisperServerBackend {
         proc.on("exit", (code, signal) => {
             console.log(`[WhisperServer] Process exited — code=${code}, signal=${signal}, startupSettled=${startupSettled}, isReady=${this.isReady}`);
             this.isReady = false;
-            if (!startupSettled) {
-                // Process died before emitting "ready" — reject the startup promise
+            if (startupReject) {
+                // Process died before we got a ready signal — reject the start() promise
                 startupSettled = true;
-                reject(new Error(`Whisper server process exited (code=${code}, signal=${signal}) before becoming ready. Check Python stderr above for details.`));
+                startupReject(new Error(`Server exited with code ${code ?? signal} before becoming ready`));
+                startupReject = null;
             } else if (this.currentReject) {
                 // Process died during an active transcription request
-                this.currentReject(new Error(`Server exited with code ${code}`));
+                this.currentReject(new Error(`Server exited with code ${code ?? signal}`));
                 this.currentReject = null;
                 this.currentResolve = null;
             }
@@ -118,11 +119,15 @@ export class WhisperServerBackend {
                     this.isReady = true;
                     this.rl!.off("line", onFirstReady);
                     console.log(`[WhisperServer] Server is ready — model loaded`);
+                    startupReject = null; // Clear — we no longer need to reject on exit
                     resolve();
                 } else if (msg.type === "error") {
                     if (!startupSettled) {
                         startupSettled = true;
-                        reject(new Error(msg.error));
+                        if (startupReject) {
+                            startupReject(new Error(msg.error));
+                            startupReject = null;
+                        }
                     }
                 }
             } catch (_) {}

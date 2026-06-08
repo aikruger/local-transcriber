@@ -80,44 +80,101 @@ export class PythonEnvironment {
 		return fallback;
 	}
 
-	async resolvePythonExecutable(): Promise<string> {
-		const current = this.getPythonExecutable();
-		// If already absolute, return as-is
-		if (path.isAbsolute(current)) {
-			console.log(`[PythonEnvironment] resolvePythonExecutable() — already absolute: "${current}"`);
-			return current;
+	async findSystemPython(): Promise<string> {
+		const stored = this.plugin.settings.pythonPath;
+		// If we have a stored absolute path that is NOT a suspicious venv, use it
+		if (stored && stored.trim() !== '' && path.isAbsolute(stored)) {
+			const lower = stored.toLowerCase();
+			const isBad = lower.includes('hermes') || lower.includes('copilot') ||
+						  lower.includes('windowsapps') ||
+						  (lower.includes('agent') && lower.includes('venv'));
+			if (!isBad) {
+				console.log(`[PythonEnvironment] findSystemPython() — using stored path: "${stored}"`);
+				return stored;
+			}
 		}
-		// Resolve 'python' or 'python3' to an absolute path
-		const whichCmd = os.platform() === 'win32' ? 'where' : 'which';
-		return new Promise((resolve) => {
-			execFile(whichCmd, [current], (error, stdout) => {
-				if (error || !stdout.trim()) {
-					console.warn(`[PythonEnvironment] Could not resolve "${current}" via ${whichCmd}, using as-is`);
-					resolve(current);
-				} else {
-					// 'where' on Windows returns multiple lines; take the first non-empty one
-					// Skip Microsoft Store stubs (WindowsApps)
-					const lines = stdout.trim().split(/\r?\n/)
-						.map(l => l.trim())
-						.filter(l => l.length > 0 && !l.toLowerCase().includes('windowsapps'));
-					const resolved = lines[0] || current;
-					console.log(`[PythonEnvironment] resolvePythonExecutable() "${current}" → "${resolved}"`);
-					resolve(resolved);
-				}
+
+		if (os.platform() !== 'win32') {
+			// Non-Windows: which python3 is reliable
+			return new Promise((resolve) => {
+				execFile('which', ['python3'], (err, stdout) => {
+					const result = stdout.trim() || 'python3';
+					console.log(`[PythonEnvironment] findSystemPython() → "${result}"`);
+					resolve(result);
+				});
+			});
+		}
+
+		// Windows: search candidate paths, skip WindowsApps stubs
+		const candidates: string[] = [];
+
+		// 1. Check where.exe output, filter out WindowsApps
+		const whereResults = await new Promise<string[]>((resolve) => {
+			execFile('where', ['python'], (err, stdout) => {
+				if (err || !stdout.trim()) { resolve([]); return; }
+				const lines = stdout.trim().split(/\r?\n/)
+					.map(l => l.trim())
+					.filter(l => l.length > 0 && !l.toLowerCase().includes('windowsapps'));
+				resolve(lines);
 			});
 		});
+		candidates.push(...whereResults);
+
+		// 2. Check common known install locations
+		const username = os.userInfo().username;
+		const commonPaths = [
+			`C:\\Python312\\python.exe`,
+			`C:\\Python311\\python.exe`,
+			`C:\\Python310\\python.exe`,
+			`C:\\Users\\${username}\\AppData\\Local\\Programs\\Python\\Python312\\python.exe`,
+			`C:\\Users\\${username}\\AppData\\Local\\Programs\\Python\\Python311\\python.exe`,
+			`C:\\Users\\${username}\\AppData\\Local\\Programs\\Python\\Python310\\python.exe`,
+			`C:\\Program Files\\Python312\\python.exe`,
+			`C:\\Program Files\\Python311\\python.exe`,
+		];
+		for (const p of commonPaths) {
+			if (fs.existsSync(p) && !candidates.includes(p)) {
+				candidates.push(p);
+			}
+		}
+
+		// 3. Test each candidate — take the first one where faster_whisper imports OK
+		for (const candidate of candidates) {
+			console.log(`[PythonEnvironment] findSystemPython() — testing candidate: "${candidate}"`);
+			const works = await new Promise<boolean>((resolve) => {
+				execFile(candidate, ['-c', 'import faster_whisper; print("ok")'], { timeout: 8000 }, (err, stdout) => {
+					resolve(!err && stdout.trim().startsWith('ok'));
+				});
+			});
+			if (works) {
+				console.log(`[PythonEnvironment] findSystemPython() — found working Python with faster_whisper: "${candidate}"`);
+				// Save it for all future calls
+				this.plugin.settings.pythonPath = candidate;
+				await this.plugin.saveSettings();
+				return candidate;
+			}
+		}
+
+		// 4. Fallback: return first candidate that at least runs, even without faster_whisper
+		if (candidates.length > 0 && candidates[0]) {
+			console.warn(`[PythonEnvironment] findSystemPython() — no Python has faster_whisper, returning first candidate: "${candidates[0]}"`);
+			return candidates[0];
+		}
+
+		console.error('[PythonEnvironment] findSystemPython() — no Python found at all');
+		return 'python'; // last resort
 	}
 
 	async verifyFasterWhisper(): Promise<boolean> {
+		const pyPath = await this.findSystemPython();
+		console.log(`[PythonEnvironment] verifyFasterWhisper() — testing import with: ${pyPath}`);
 		return new Promise((resolve) => {
-			const pyPath = this.getPythonExecutable();
-			console.log(`[PythonEnvironment] verifyFasterWhisper() — testing import with: ${pyPath}`);
-			execFile(pyPath, ['-c', 'import faster_whisper; print("ok")'], (error, stdout, stderr) => {
+			execFile(pyPath, ['-c', 'import faster_whisper; print("ok")'], { timeout: 10000 }, (error, stdout, stderr) => {
 				if (error || !stdout.trim().startsWith('ok')) {
-					console.error(`[PythonEnvironment] faster_whisper import FAILED. stderr: ${stderr}`);
+					console.error(`[PythonEnvironment] faster_whisper import FAILED with "${pyPath}". stderr: ${stderr}`);
 					resolve(false);
 				} else {
-					console.log(`[PythonEnvironment] faster_whisper import verified OK`);
+					console.log(`[PythonEnvironment] faster_whisper import verified OK with "${pyPath}"`);
 					resolve(true);
 				}
 			});
@@ -168,7 +225,7 @@ export class PythonEnvironment {
 
 	async bootstrapPython(logger: { log: (msg: string) => void }): Promise<void> {
 		// Resolve the absolute Python path BEFORE spawning bootstrap
-		const pyPath = await this.resolvePythonExecutable();
+		const pyPath = await this.findSystemPython();
 		console.log(`[PythonEnvironment] bootstrapPython() — using Python: "${pyPath}"`);
 		// Save it immediately so all future calls use the same interpreter
 		this.plugin.settings.pythonPath = pyPath;

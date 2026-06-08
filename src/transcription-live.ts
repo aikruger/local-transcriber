@@ -91,7 +91,7 @@ export class TranscriptionLive {
 			this.totalRecordedSamplesCount += inputData.length;
 			if (this.chunkBufferSamples.length > (16000 * 5) / 4096) {
 				// Guard: only extract if server is actually ready
-				if (!this.whisperServer?.ready) {
+				if (!this.whisperServer?.isReady) {
 					console.warn('[TranscriptionLive] onaudioprocess — skipping chunk, server not ready');
 					this.chunkBufferSamples = []; // discard buffered audio
 					return;
@@ -127,12 +127,13 @@ export class TranscriptionLive {
 		this.chunkBufferSamples = [];
 
 		const rms = Math.sqrt(samples.reduce((sum, s) => sum + s * s, 0) / samples.length);
-		const minDurationSecs = 1.0;
+		const SILENCE_RMS_THRESHOLD = 0.001; // was 0.005 — lowered for typical mic gain levels
+		const MIN_CHUNK_DURATION_SECS = 1.0;
 		const chunkDurationSecs = samples.length / 16000;
 		console.log(`[TranscriptionLive] Chunk energy RMS=${rms.toFixed(5)}, duration=${chunkDurationSecs.toFixed(2)}s`);
 
-		if (chunkDurationSecs < minDurationSecs || rms < 0.005) {
-			console.warn(`[TranscriptionLive] Skipping chunk — too short (${chunkDurationSecs.toFixed(2)}s) or silent (RMS=${rms.toFixed(5)})`);
+		if (chunkDurationSecs < MIN_CHUNK_DURATION_SECS || rms < SILENCE_RMS_THRESHOLD) {
+			console.warn(`[TranscriptionLive] Skipping chunk — duration=${chunkDurationSecs.toFixed(2)}s, RMS=${rms.toFixed(5)} (threshold=${SILENCE_RMS_THRESHOLD})`);
 			this.isProcessingChunk = false;
 			return;
 		}
