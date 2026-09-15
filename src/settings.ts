@@ -129,6 +129,27 @@ export class LocalTranscriberSettingTab extends PluginSettingTab {
 						);
 
 		new Setting(containerEl)
+			.setName('Re-run Setup')
+			.setDesc('Reinstalls faster-whisper and resets the Python path. Use this if you see "No module named faster_whisper".')
+			.addButton(btn => btn
+				.setButtonText('Re-run Setup')
+				.setWarning()
+				.onClick(async () => {
+					console.log('[Settings] Re-run Setup clicked — clearing pythonPath and env flags');
+					this.plugin.settings.pythonPath = '';
+					this.plugin.settings.envReady = false;
+					this.plugin.settings.modelsReady = false;
+					await this.plugin.saveSettings();
+					// Trigger the setup flow again
+					await this.plugin.pythonEnv.setupWhisperEnvironment({
+						log: (msg) => console.log(`[Settings Re-setup] ${msg}`),
+						setStage: (stage) => console.log(`[Settings Re-setup stage] ${stage}`)
+					});
+					new Notice('Setup complete. Try transcribing again.');
+				})
+			);
+
+		new Setting(containerEl)
 			.setName("Refresh Ollama model list")
 			.setDesc(
 				"Query the local Ollama instance and update the list of available models. " +

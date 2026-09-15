@@ -55,7 +55,8 @@ def main():
         print(f"Failed to download base model: {e}", file=sys.stderr)
         sys.exit(2)
 
-    emit({"status": "done"})
+    emit({"status": "done", "python_executable": sys.executable})
+    print(f"[bootstrap] Using Python executable: {sys.executable}", file=sys.stderr, flush=True)
     sys.exit(0)
 
 if __name__ == "__main__":
