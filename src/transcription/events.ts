@@ -3,6 +3,12 @@ export interface Segment {
     end: number;
     text: string;
     speaker?: string | null;
+    words?: {
+        start: number;
+        end: number;
+        text: string;
+        probability?: number;
+    }[];
 }
 
 export type TranscriptionEvent =
@@ -19,6 +25,12 @@ export interface FileTranscriptionOptions {
     language: string;
     speakers: string; // "0", "auto", "2", etc.
     modelsDir?: string;
+    wordTimestamps?: boolean;
+    beamSize?: number;
+    bestOf?: number;
+    temperature?: number | number[];
+    hotwords?: string[];
+    initialPrompt?: string;
 }
 
 export interface LiveTranscriptionOptions {

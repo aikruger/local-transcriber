@@ -1,5 +1,6 @@
 import { App, Notice } from 'obsidian';
 import LocalTranscriberPlugin from './main';
+import { WHISPER_MODELS, estimateTranscriptionTime } from './models/whisper-models';
 
 export class Diagnostics {
 	plugin: LocalTranscriberPlugin;
@@ -81,6 +82,21 @@ except Exception as e:
 				}
 			} else {
 				new Notice('❌ Ollama is not reachable on localhost:11434');
+			}
+
+			try {
+				console.log("[local-transcriber] Diagnostics: Whisper models", {
+				  models: WHISPER_MODELS.map((m: any) => m.id),
+				  selectedModel: this.plugin.settings.modelSize,
+				});
+				const parts = this.plugin.settings.modelSize.split('::');
+				if (parts[0] === 'python-whisper') {
+					const est30 = estimateTranscriptionTime(1800, parts[1] || 'large-v3');
+					new Notice(`✅ Whisper models OK. 30min est for ${parts[1]}: ${Math.round(est30.minSeconds/60)}-${Math.round(est30.maxSeconds/60)}m`);
+				} else {
+					new Notice(`✅ Whisper models OK.`);
+				}
+			} catch (e: any) {
 			}
 
 		} catch (e: any) {
