@@ -16,6 +16,16 @@ export class PythonWhisperFileBackend implements FileTranscriptionBackend {
 			const transcribeScript = path.join(pluginDir, 'local_transcriber', 'transcribe.py');
 			const pyPath = this.plugin.pythonEnv.getPythonExecutable();
 
+			console.log("[local-transcriber] Whisper backend", {
+				backend: "python-whisper",
+				model: options.modelId,
+				wordTimestamps: options.wordTimestamps,
+				language: options.language,
+			});
+
+			const startTime = Date.now();
+			let lastOutputTime = Date.now();
+
 			const child = spawn(pyPath, [
 				transcribeScript,
 				'--input', options.inputPath,
@@ -25,13 +35,46 @@ export class PythonWhisperFileBackend implements FileTranscriptionBackend {
 				'--models-dir', options.modelsDir || ''
 			]);
 
+			console.log("[local-transcriber] Worker started", { kind: "whisper", pid: child.pid });
+
 			let finalJson = '';
 			let rawStdout = '';
             let segments: Segment[] = [];
 
+			const stallTimeoutMs = 120000; // 2 minutes
+			const stallCheckInterval = setInterval(() => {
+				if (Date.now() - lastOutputTime > stallTimeoutMs) {
+					console.warn("[local-transcriber] Worker stalled", { kind: "whisper", elapsedMs: Date.now() - startTime });
+					console.error("[local-transcriber] Worker force-killed", { kind: "whisper", pid: child.pid });
+					child.kill('SIGKILL');
+					clearInterval(stallCheckInterval);
+					reject(new Error('Whisper worker stalled (no output for 2 mins).'));
+				}
+			}, 10000);
+
+			const onAbort = () => {
+				console.log("[local-transcriber] Cancelling worker", { kind: "whisper", pid: child.pid });
+				child.kill('SIGTERM');
+				setTimeout(() => {
+					if (!child.killed) {
+						console.warn("[local-transcriber] Worker did not exit gracefully, forcing kill", { kind: "whisper", pid: child.pid });
+						child.kill('SIGKILL');
+					}
+				}, 2000);
+			};
+
+			if ((options as any).signal) {
+				if ((options as any).signal.aborted) {
+					onAbort();
+				} else {
+					(options as any).signal.addEventListener('abort', onAbort);
+				}
+			}
+
 			child.stdout.on('data', (chunk) => {
 				const text = chunk.toString();
 				rawStdout += text;
+				lastOutputTime = Date.now();
 				const lines = text.split('\n').filter((l: string) => l.trim());
 				for (const line of lines) {
 					if (line.startsWith('{')) {
@@ -55,9 +98,21 @@ export class PythonWhisperFileBackend implements FileTranscriptionBackend {
 			let stderrOutput = '';
 			child.stderr.on('data', (data) => {
 				stderrOutput += data.toString();
+				lastOutputTime = Date.now();
 			});
 
 			child.on('close', (code) => {
+				clearInterval(stallCheckInterval);
+				if ((options as any).signal) {
+					(options as any).signal.removeEventListener('abort', onAbort);
+				}
+
+				if ((options as any).signal?.aborted) {
+					console.log("[local-transcriber] Worker terminated", { kind: "whisper", reason: "cancelled" });
+					reject(new Error("Cancelled"));
+					return;
+				}
+
 				if (code !== 0) {
 					reject(new Error(`Process failed with code ${code}.\n${stderrOutput || 'No stderr.'}`));
 					return;

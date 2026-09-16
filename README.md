@@ -240,3 +240,5 @@ The plugin ships a `local_transcriber/` Python package inside the plugin folder:
 ## License
 
 MIT
+### Transcription Progress & Time Estimates
+File transcription now provides a clear modal interface showing progress stages (`extract`, `transcribe`, `diarize`, `align`, `output`) and allows for reliable cancellation at any point. When selecting your Whisper model (`tiny`, `base`, `small`, `medium`, `large-v3`), you will receive dynamic time estimates for how long the transcription is expected to take based on the audio file's duration.
