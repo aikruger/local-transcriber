@@ -79,6 +79,14 @@ This is a one-time process; the plugin stores `envReady` and `modelsReady` in `d
 3. Choose model/speaker settings in the modal and start.
 4. Output files appear in your configured **Audio Output Folder**.
 
+### File transcription with Diarization (external file)
+
+1. Open the **Command Palette** (`Ctrl/Cmd + P`).
+2. Run **Local Transcriber: Transcribe file with diarization**.
+3. Use the file picker to select an audio/video file.
+4. Select the number of speakers and the Whisper model to use.
+5. Click **Transcribe**. Output files (`.transcript.md`) will appear in the `local-transcriber-tmp` folder inside your vault (which will be processed and placed alongside your original files or outputted accordingly based on your settings).
+
 ### File transcription (external file)
 
 1. Open the **Command Palette** (`Ctrl/Cmd + P`).
