@@ -9,7 +9,7 @@ export class PyannoteWorker implements DiarizationBackend {
 
   constructor(pythonExecutable: string, pluginDir: string) {
     this.pythonExecutable = pythonExecutable;
-    this.scriptPath = path.join(pluginDir, 'scripts', 'diarize.py');
+    this.scriptPath = path.join(pluginDir, 'local_transcriber', 'diarize.py');
   }
 
   async diarize(options: DiarizationOptions): Promise<DiarizationSegment[]> {
