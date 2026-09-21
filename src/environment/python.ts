@@ -56,24 +56,10 @@ export class PythonEnvironment {
 
 	getPythonExecutable(): string {
 		const stored = this.plugin.settings.pythonPath;
-		// Guard: reject venv paths that are not the plugin's own environment
-		// The hermes-agent venv is a known bad path to watch for
+		// Return stored path if available.
 		if (stored && stored.trim() !== '') {
-			const lowerPath = stored.toLowerCase();
-			// If the stored path looks like an external agent/tool venv, ignore it
-			const isSuspiciousVenv = lowerPath.includes('hermes') ||
-									  lowerPath.includes('copilot') ||
-									  lowerPath.includes('agent') && lowerPath.includes('venv');
-			if (isSuspiciousVenv) {
-				console.warn(`[PythonEnvironment] getPythonExecutable() — stored path looks like an external venv, ignoring: "${stored}"`);
-				// Clear the bad path
-				this.plugin.settings.pythonPath = '';
-				// Don't await here — fire and forget
-				this.plugin.saveSettings().catch(e => console.error('[PythonEnvironment] Failed to clear bad pythonPath:', e));
-			} else {
-				console.log(`[PythonEnvironment] getPythonExecutable() → "${stored}"`);
-				return stored;
-			}
+			console.log(`[PythonEnvironment] getPythonExecutable() → "${stored}"`);
+			return stored;
 		}
 		const fallback = os.platform() === 'win32' ? 'python' : 'python3';
 		console.log(`[PythonEnvironment] getPythonExecutable() → "${fallback}" (fallback)`);
@@ -82,16 +68,10 @@ export class PythonEnvironment {
 
 	async findSystemPython(): Promise<string> {
 		const stored = this.plugin.settings.pythonPath;
-		// If we have a stored absolute path that is NOT a suspicious venv, use it
+		// If we have a stored absolute path use it
 		if (stored && stored.trim() !== '' && path.isAbsolute(stored)) {
-			const lower = stored.toLowerCase();
-			const isBad = lower.includes('hermes') || lower.includes('copilot') ||
-						  lower.includes('windowsapps') ||
-						  (lower.includes('agent') && lower.includes('venv'));
-			if (!isBad) {
-				console.log(`[PythonEnvironment] findSystemPython() — using stored path: "${stored}"`);
-				return stored;
-			}
+			console.log(`[PythonEnvironment] findSystemPython() — using stored path: "${stored}"`);
+			return stored;
 		}
 
 		if (os.platform() !== 'win32') {

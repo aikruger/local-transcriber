@@ -26,14 +26,21 @@ export class PythonWhisperFileBackend implements FileTranscriptionBackend {
 			const startTime = Date.now();
 			let lastOutputTime = Date.now();
 
-			const child = spawn(pyPath, [
+			const args = [
 				transcribeScript,
 				'--input', options.inputPath,
 				'--model', options.modelId,
 				'--language', options.language,
 				'--speakers', options.speakers,
 				'--models-dir', options.modelsDir || ''
-			]);
+			];
+
+			console.log("[python-whisper] Spawning Whisper worker", { pythonExe: pyPath, args, cwd: pluginDir });
+
+			const child = spawn(pyPath, args, {
+				env: { ...process.env },
+				cwd: pluginDir,
+			});
 
 			console.log("[local-transcriber] Worker started", { kind: "whisper", pid: child.pid });
 

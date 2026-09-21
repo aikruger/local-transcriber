@@ -65,7 +65,7 @@ export async function runFileTranscriptionWithDiarization(
         const app = plugin.app;
         const adapter: any = app.vault.adapter;
         const vaultPath = adapter && adapter.getBasePath ? adapter.getBasePath() : '';
-        const pluginDir = [vaultPath, app.vault.configDir, 'plugins', 'local-transcriber'].join('/');
+        const pluginDir = [vaultPath, app.vault.configDir, 'plugins', plugin.manifest.id].join('/');
 
         diarizationResult = await diarizeAudio(plugin.pythonEnv.getPythonExecutable(), pluginDir, diarizationOptions);
     } catch (e: any) {
@@ -87,15 +87,11 @@ export async function runFileTranscriptionWithDiarization(
     const stem = safeName.replace(/\.[^.]+$/, '') + '.transcript';
     console.log('[FileTranscriber] Writing outputs to', stem);
 
-    const originalAudioFolder = plugin.settings.audioFolder;
-    plugin.settings.audioFolder = tmpDir;
     try {
-        await plugin.outputWriters.saveOutputs(stem, aligned, plugin.settings.markdownInterval, plugin.settings.markdownPauseGap);
+        await plugin.outputWriters.saveOutputs(stem, aligned, plugin.settings.markdownInterval, plugin.settings.markdownPauseGap, tmpDir);
     } catch (e: any) {
         console.error('[FileTranscriber] Error in output step', e);
         throw e;
-    } finally {
-        plugin.settings.audioFolder = originalAudioFolder;
     }
 
     new Notice(`Transcription complete: ${tmpDir}/${stem}.md`);

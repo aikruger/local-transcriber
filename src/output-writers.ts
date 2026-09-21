@@ -31,12 +31,16 @@ export class OutputWriters {
 		stem: string,
 		segments: any[],
 		intervalOverride?: number,
-		pauseGapOverride?: number
+		pauseGapOverride?: number,
+		customFolderPath?: string
 	) {
 		const interval = intervalOverride ?? this.plugin.settings.markdownInterval;
 		const pauseGap = pauseGapOverride ?? this.plugin.settings.markdownPauseGap;
 
-		const folderPath = this.plugin.settings.audioFolder.endsWith('/') ? this.plugin.settings.audioFolder : this.plugin.settings.audioFolder + '/';
+		let folderPath = customFolderPath ?? this.plugin.settings.audioFolder;
+		if (!folderPath.endsWith('/')) {
+			folderPath += '/';
+		}
 
 		if (!await this.app.vault.adapter.exists(folderPath.replace(/\/$/, ''))) {
 			await this.app.vault.createFolder(folderPath.replace(/\/$/, ''));
