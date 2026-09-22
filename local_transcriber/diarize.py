@@ -5,6 +5,7 @@ import argparse
 from pyannote.audio import Pipeline
 
 def main():
+    print("[diarize] Starting diarization", flush=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("--audio-path", required=True)
     parser.add_argument("--expected-speakers", type=int)
@@ -12,6 +13,8 @@ def main():
     parser.add_argument("--max-speakers", type=int)
     parser.add_argument("--hf-token", default=None)
     args = parser.parse_args()
+
+    print(f"[diarize] Loaded audio: {args.audio_path}", flush=True)
 
     try:
         pipeline = Pipeline.from_pretrained(
@@ -28,7 +31,11 @@ def main():
             if args.max_speakers is not None:
                 kwargs["max_speakers"] = args.max_speakers
 
+        print(f"[diarize] Running diarization with kwargs: {kwargs}", flush=True)
+
         diarization = pipeline(args.audio_path, **kwargs)
+
+        print("[diarize] Diarization complete, formatting segments", flush=True)
 
         segments = []
         for turn, _, speaker in diarization.itertracks(yield_label=True):

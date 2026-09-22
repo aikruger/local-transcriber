@@ -1,14 +1,18 @@
 import { spawn } from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import { DiarizationOptions, DiarizationBackend } from './types';
 import { DiarizationSegment } from '../models/transcript';
 
 export class PyannoteWorker implements DiarizationBackend {
   private pythonExecutable: string;
   private scriptPath: string;
+  private pluginDir: string;
 
   constructor(pythonExecutable: string, pluginDir: string) {
     this.pythonExecutable = pythonExecutable;
+    this.pluginDir = pluginDir;
     this.scriptPath = path.join(pluginDir, 'local_transcriber', 'diarize.py');
   }
 
@@ -19,7 +23,22 @@ export class PyannoteWorker implements DiarizationBackend {
       backend: "pyannote",
     });
 
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
+      console.log('[pyannote-worker] Plugin dir', this.pluginDir);
+      console.log('[pyannote-worker] Script path', this.scriptPath);
+
+      const exists = await fs
+        .access(this.scriptPath, fsSync.constants.F_OK)
+        .then(() => true)
+        .catch(() => false);
+
+      console.log('[pyannote-worker] Script exists?', exists);
+
+      if (!exists) {
+        reject(new Error(`Diarization script not found at ${this.scriptPath}`));
+        return;
+      }
+
       const args = ['--audio-path', options.audioPath];
 
       if (options.expectedSpeakers !== undefined) {
@@ -38,7 +57,11 @@ export class PyannoteWorker implements DiarizationBackend {
       }
 
       const startTime = Date.now();
-      const worker = spawn(this.pythonExecutable, [this.scriptPath, ...args], { signal: options.signal });
+      const worker = spawn(this.pythonExecutable, [this.scriptPath, ...args], {
+        signal: options.signal,
+        env: { ...process.env },
+        cwd: this.pluginDir,
+      });
 
       console.log("[local-transcriber] Diarisation worker started", { pid: worker.pid });
 
