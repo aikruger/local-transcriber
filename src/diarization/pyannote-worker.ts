@@ -23,22 +23,21 @@ export class PyannoteWorker implements DiarizationBackend {
       backend: "pyannote",
     });
 
-    return new Promise(async (resolve, reject) => {
-      console.log('[pyannote-worker] Plugin dir', this.pluginDir);
-      console.log('[pyannote-worker] Script path', this.scriptPath);
+    console.log('[pyannote-worker] Plugin dir', this.pluginDir);
+    console.log('[pyannote-worker] Script path', this.scriptPath);
 
-      const exists = await fs
-        .access(this.scriptPath, fsSync.constants.F_OK)
-        .then(() => true)
-        .catch(() => false);
+    const exists = await fs
+      .access(this.scriptPath, fsSync.constants.F_OK)
+      .then(() => true)
+      .catch(() => false);
 
-      console.log('[pyannote-worker] Script exists?', exists);
+    console.log('[pyannote-worker] Script exists?', exists);
 
-      if (!exists) {
-        reject(new Error(`Diarization script not found at ${this.scriptPath}`));
-        return;
-      }
+    if (!exists) {
+      throw new Error(`Diarization script not found at ${this.scriptPath}`);
+    }
 
+    return new Promise((resolve, reject) => {
       const args = ['--audio-path', options.audioPath];
 
       if (options.expectedSpeakers !== undefined) {
@@ -143,7 +142,24 @@ export class PyannoteWorker implements DiarizationBackend {
 
         try {
           const jsonStr = stdout.trim();
-          const parsed = JSON.parse(jsonStr);
+          // Find the last line that looks like JSON, which is our result payload
+          const lines = jsonStr.split('\n');
+          let parsed: any;
+          for (let i = lines.length - 1; i >= 0; i--) {
+              try {
+                  const line = lines[i];
+                  if (!line) continue;
+                  parsed = JSON.parse(line);
+                  if (parsed.segments) {
+                      break;
+                  }
+              } catch (e) {
+                  // ignore
+              }
+          }
+          if (!parsed || !parsed.segments) {
+              throw new Error("Could not find valid segments in output");
+          }
           resolve(parsed.segments as DiarizationSegment[]);
         } catch (err: any) {
           console.error("[local-transcriber] Diarisation output parse failed", { stdout, error: err.message });

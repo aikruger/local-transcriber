@@ -1,8 +1,8 @@
 import { App } from 'obsidian';
+import { execFile, spawn } from 'child_process';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
-import { execFile, spawn } from 'child_process';
 import LocalTranscriberPlugin from '../main';
 
 export class PythonEnvironment {
@@ -14,24 +14,31 @@ export class PythonEnvironment {
 		this.app = plugin.app;
 	}
 
-	async setupWhisperEnvironment(logger: { log: (msg: string) => void, setStage: (stage: string) => void }) {
-		let hasPy = await this.hasPython();
+	async setupWhisperEnvironment(logger: { setStage: (s: string) => void; log: (m: string) => void }): Promise<void> {
+		if (this.plugin.settings.envReady && this.plugin.settings.modelsReady) {
+			return;
+		}
+
+		logger.setStage('Checking environment');
+
+		let hasPython = await this.hasPython();
 		let hasFf = await this.hasFFmpeg();
 
-		if (!hasPy && this.plugin.settings.installOnWindows && os.platform() === 'win32') {
-			logger.log('Python not found. Installing Python (this may take several minutes)...');
-			await this.installPythonWindows();
-			hasPy = await this.hasPython();
+		if (os.platform() === 'win32' && this.plugin.settings.installOnWindows) {
+			if (!hasPython) {
+				logger.setStage('Installing Python (winget)');
+				await this.installPythonWindows();
+				hasPython = await this.hasPython();
+			}
+			if (!hasFf) {
+				logger.setStage('Installing FFmpeg (winget)');
+				await this.installFFmpegWindows();
+				hasFf = await this.hasFFmpeg();
+			}
 		}
 
-		if (!hasFf && this.plugin.settings.installOnWindows && os.platform() === 'win32') {
-			logger.log('FFmpeg not found. Installing FFmpeg...');
-			await this.installFFmpegWindows();
-			hasFf = await this.hasFFmpeg();
-		}
-
-		if (!hasPy) {
-			throw new Error("Python is required. Please install Python 3.10+ and add it to PATH.");
+		if (!hasPython) {
+			throw new Error("Python 3.10+ is required. Please install Python and add it to PATH. If installed, try setting the Python Path Override in settings.");
 		}
 		if (!hasFf) {
 			throw new Error("FFmpeg is required. Please install FFmpeg and add it to PATH.");
@@ -51,7 +58,7 @@ export class PythonEnvironment {
 		}
 		const adapter: any = this.app.vault.adapter;
 		const base = adapter?.getBasePath ? adapter.getBasePath() : '';
-		return path.join(base, this.app.vault.configDir, 'plugins', 'local-transcriber', 'models');
+		return path.join(base, this.app.vault.configDir, 'plugins', this.plugin.manifest.id, 'models');
 	}
 
 	getPythonExecutable(): string {
@@ -206,7 +213,7 @@ export class PythonEnvironment {
 	async bootstrapPython(logger: { log: (msg: string) => void }): Promise<void> {
 		// Resolve the absolute Python path BEFORE spawning bootstrap
 		const pyPath = await this.findSystemPython();
-		console.log(`[PythonEnvironment] bootstrapPython() — using Python: "${pyPath}"`);
+		console.log(`[PythonEnvironment] Effective Python executable: "${pyPath}"`);
 		// Save it immediately so all future calls use the same interpreter
 		this.plugin.settings.pythonPath = pyPath;
 		await this.plugin.saveSettings();
@@ -214,7 +221,7 @@ export class PythonEnvironment {
 		return new Promise((resolve, reject) => {
 			const adapter: any = this.app.vault.adapter;
 			const vaultPath = adapter && adapter.getBasePath ? adapter.getBasePath() : '';
-			const pluginDir = path.join(vaultPath, this.app.vault.configDir, 'plugins', 'local-transcriber');
+			const pluginDir = path.join(vaultPath, this.app.vault.configDir, 'plugins', this.plugin.manifest.id);
 			const bootstrapScript = path.join(pluginDir, 'local_transcriber', 'bootstrap.py');
 			const modelsDir = this.getModelsDir();
 
@@ -265,7 +272,18 @@ export class PythonEnvironment {
 			});
 
 			child.on('close', (code) => {
-				if (code === 0) resolve();
+				if (code === 0) {
+                    execFile(pyPath, ['-c', 'import faster_whisper; import pyannote.audio; print("dependency checks passed")'], (err, stdout, stderr) => {
+                        if (err || !stdout.trim().startsWith('dependency checks passed')) {
+                            console.error(`[PythonEnvironment] Python validation failed`, { pyPath, stderr });
+                            reject(new Error(`Post-bootstrap dependency check failed with ${pyPath}: ${stderr || 'Unknown error'}`));
+                        } else {
+                            console.log(`[PythonEnvironment] faster-whisper import check passed`);
+                            console.log(`[PythonEnvironment] pyannote.audio import check passed`);
+                            resolve();
+                        }
+                    });
+                }
 				else {
 					reject(new Error(
 						`Bootstrap failed with code ${code}.\n` +

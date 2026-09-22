@@ -1,4 +1,8 @@
 import { Notice, App } from 'obsidian';
+import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs';
+import * as crypto from 'crypto';
 import type LocalTranscriberPlugin from '../../main';
 import { PythonWhisperFileBackend } from './python-whisper';
 import { diarizeAudio } from '../../diarization/service';
@@ -12,32 +16,32 @@ export async function runFileTranscriptionWithDiarization(
 ) {
   console.log('[FileTranscriber] Starting pipeline', { name: file.name, numSpeakers, whisperModel });
 
-  // 1. Persist file to disk (plugin.app is your Obsidian App)
-  const basePath = (plugin.app as any).vault.adapter.getBasePath?.() as string | undefined;
-  if (!basePath) {
-    throw new Error('Cannot determine vault base path');
-  }
-
-  // Choose a temp directory inside the vault or system temp; here we use a subfolder in vault
-  const tmpDir = 'local-transcriber-tmp';
-  await (plugin.app.vault.adapter as any).mkdir(tmpDir).catch(() => {});
-
   const safeName = file.name.replace(/[^a-z0-9._-]/gi, '_');
-  const tmpPath = `${tmpDir}/${safeName}`;
 
-  // Write ArrayBuffer to vault adapter
-  const buffer = await file.arrayBuffer();
-  await (plugin.app.vault.adapter as any).writeBinary(tmpPath, buffer);
-  console.log('[FileTranscriber] Wrote temp file', tmpPath);
+  const tempRoot = path.join(os.tmpdir(), 'local-transcriber');
+  await fs.promises.mkdir(tempRoot, { recursive: true });
 
-  const fullPath = [basePath, tmpPath].join('/');
+  const jobId = `${Date.now()}-${crypto.randomUUID()}`;
+  const tempDir = path.join(tempRoot, jobId);
+  await fs.promises.mkdir(tempDir, { recursive: true });
+
+  const tempMediaPath = path.join(tempDir, safeName);
+
+  console.log('[FileTranscriber] Writing temporary media outside vault', {
+    originalName: file.name,
+    tempMediaPath,
+    size: file.size,
+  });
+
+  const buffer = Buffer.from(await file.arrayBuffer());
+  await fs.promises.writeFile(tempMediaPath, buffer);
 
   try {
     // 2. Transcribe
     console.log('[FileTranscriber] Running Whisper transcription');
     const backend = new PythonWhisperFileBackend(plugin);
     const options = {
-        inputPath: fullPath,
+        inputPath: tempMediaPath,
         modelId: whisperModel.split('::').slice(1).join('::') || whisperModel,
         language: plugin.settings.fileLanguage,
         speakers: "0",
@@ -49,6 +53,9 @@ export async function runFileTranscriptionWithDiarization(
         transcriptionResult = await backend.transcribeFile(options, (msg) => {
             // Optional: Handle progress events if needed
         });
+        console.log('[FileTranscriber] Whisper transcription complete', {
+            segmentCount: transcriptionResult.segments.length,
+        });
     } catch (e: any) {
         console.error('[FileTranscriber] Error in transcription step', e);
         throw e;
@@ -59,15 +66,18 @@ export async function runFileTranscriptionWithDiarization(
     let diarizationResult: any;
     try {
         const diarizationOptions = {
-            audioPath: fullPath,
+            audioPath: tempMediaPath,
             expectedSpeakers: numSpeakers
         };
         const app = plugin.app;
         const adapter: any = app.vault.adapter;
         const vaultPath = adapter && adapter.getBasePath ? adapter.getBasePath() : '';
-        const pluginDir = [vaultPath, app.vault.configDir, 'plugins', plugin.manifest.id].join('/');
+        const pluginDir = path.join(vaultPath, app.vault.configDir, 'plugins', plugin.manifest.id);
 
         diarizationResult = await diarizeAudio(plugin.pythonEnv.getPythonExecutable(), pluginDir, diarizationOptions);
+        console.log('[FileTranscriber] Diarization complete', {
+            turnCount: diarizationResult.length,
+        });
     } catch (e: any) {
         console.error('[FileTranscriber] Error in diarization step', e);
         throw e;
@@ -87,16 +97,23 @@ export async function runFileTranscriptionWithDiarization(
     const stem = safeName.replace(/\.[^.]+$/, '') + '.transcript';
     console.log('[FileTranscriber] Writing outputs to', stem);
 
+    // We will still place the outputs to the expected Obsidian vault folder based on audioFolder.
+    // The previous implementation overrode this to tmpDir, but the original requirement is to have it
+    // in the plugin's configured output folder or 'Audio'
     try {
-        await plugin.outputWriters.saveOutputs(stem, aligned, plugin.settings.markdownInterval, plugin.settings.markdownPauseGap, tmpDir);
+        await plugin.outputWriters.saveOutputs(stem, aligned, plugin.settings.markdownInterval, plugin.settings.markdownPauseGap);
     } catch (e: any) {
         console.error('[FileTranscriber] Error in output step', e);
         throw e;
     }
 
-    new Notice(`Transcription complete: ${tmpDir}/${stem}.md`);
+    new Notice(`Transcription complete! Transcripts saved.`);
   } finally {
-    // Optionally clean up temp files if desired
-    // await plugin.app.vault.adapter.remove(tmpPath);
+    console.log('[FileTranscriber] Removing temporary job directory', { tempDir });
+    try {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+    } catch(e) {
+        console.error('[FileTranscriber] Failed to remove temp job directory', e);
+    }
   }
 }
