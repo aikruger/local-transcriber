@@ -61,6 +61,7 @@ export class PyannoteWorker implements DiarizationBackend {
         signal: options.signal,
         env: { ...process.env },
         cwd: this.pluginDir,
+        shell: true,
       });
 
       console.log("[local-transcriber] Diarisation worker started", { pid: worker.pid });
