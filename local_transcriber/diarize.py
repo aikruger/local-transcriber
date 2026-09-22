@@ -3,6 +3,7 @@ import sys
 import json
 import argparse
 from pyannote.audio import Pipeline
+from pyannote.audio.core.io import Audio
 
 def main():
     print("[diarize] Starting diarization", flush=True)
@@ -37,7 +38,10 @@ def main():
 
         print(f"[diarize] Running diarization with kwargs: {kwargs}", flush=True)
 
-        diarization = pipeline(args.audio_path, **kwargs)
+        audio = Audio()
+        waveform, sample_rate = audio(args.audio_path)
+
+        diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate}, **kwargs)
 
         print("[diarize] Diarization complete, formatting segments", flush=True)
 
