@@ -2,6 +2,7 @@
 import sys
 import json
 import argparse
+import traceback
 from pyannote.audio import Pipeline
 from pyannote.audio.core.io import Audio
 
@@ -56,9 +57,10 @@ def main():
         print(json.dumps({"segments": segments}))
 
     except Exception as e:
-        print(f"[diarize] Error: {e}", flush=True)
-        print(f"Error: {e}", file=sys.stderr, flush=True)
-        sys.exit(1)
+        print(json.dumps({"event": "error", "message": str(e), "error_type": type(e).__name__}, ensure_ascii=False), flush=True)
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        raise
 
 if __name__ == "__main__":
     main()

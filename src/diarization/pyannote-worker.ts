@@ -82,22 +82,36 @@ export class PyannoteWorker implements DiarizationBackend {
 
       console.log("[local-transcriber] Diarisation worker started", { pid: worker.pid });
 
-      let stdout = '';
-      let stderr = '';
-      let lastOutputTime = Date.now();
+      let stdoutBuffer = '';
+      let stderrBuffer = '';
+      let lastActivityAt = Date.now();
 
-      const stallTimeoutMs = 60000;
-      const stallCheckInterval = setInterval(() => {
-        if (Date.now() - lastOutputTime > stallTimeoutMs) {
-          console.warn("[local-transcriber] Diarisation worker produced no output", {
-            elapsedMs: Date.now() - startTime,
-            stallTimeoutMs,
+      const markActivity = (source: 'stdout' | 'stderr', text: string) => {
+        lastActivityAt = Date.now();
+        if (source === 'stdout') {
+          console.log('[local-transcriber-diarization] STDOUT:', text);
+        } else {
+          console.warn('[local-transcriber-diarization] STDERR:', text);
+        }
+      };
+
+      const STALL_TIMEOUT_MS = 60000;
+      const watchdog = setInterval(() => {
+        const idleMs = Date.now() - lastActivityAt;
+        if (idleMs > STALL_TIMEOUT_MS) {
+          console.error('[local-transcriber] Diarisation worker produced no output', {
+            elapsedMs: idleMs,
+            stallTimeoutMs: STALL_TIMEOUT_MS,
+            pythonExe: this.pythonExecutable,
+            scriptPath: this.scriptPath,
+            stdoutTail: stdoutBuffer.slice(-2000),
+            stderrTail: stderrBuffer.slice(-2000),
           });
           worker.kill('SIGKILL');
-          clearInterval(stallCheckInterval);
+          clearInterval(watchdog);
           reject(new Error('Diarisation worker stalled (no output for 60s).'));
         }
-      }, 10000);
+      }, 5000);
 
       const onAbort = () => {
         console.log("[local-transcriber] Cancelling worker", { kind: "pyannote", pid: worker.pid });
@@ -118,16 +132,16 @@ export class PyannoteWorker implements DiarizationBackend {
           }
       }
 
-      worker.stdout.on('data', (data) => {
-        stdout += data.toString();
-        console.log(`[local-transcriber-diarization] STDOUT: ${data.toString().trim()}`);
-        lastOutputTime = Date.now();
+      worker.stdout.on('data', (chunk) => {
+        const text = chunk.toString();
+        stdoutBuffer += text;
+        markActivity('stdout', text.trim());
       });
 
       worker.stderr.on('data', (data) => {
-        stderr += data.toString();
-        console.warn(`[local-transcriber-diarization] STDERR: ${data.toString().trim()}`);
-        lastOutputTime = Date.now();
+        const text = data.toString();
+        stderrBuffer += text;
+        markActivity('stderr', text.trim());
       });
 
       worker.on('exit', (code, signal) => {
@@ -135,7 +149,7 @@ export class PyannoteWorker implements DiarizationBackend {
       });
 
       worker.on('close', (code) => {
-        clearInterval(stallCheckInterval);
+        clearInterval(watchdog);
 
         if (options.signal) {
             options.signal.removeEventListener('abort', onAbort);
@@ -151,14 +165,14 @@ export class PyannoteWorker implements DiarizationBackend {
           console.error("[local-transcriber] Diarisation failed", {
             exitCode: code,
             signal: options.signal?.aborted ? 'aborted' : undefined,
-            stderr,
+            stderr: stderrBuffer,
           });
           reject(new Error(`Diarisation worker failed with code ${code}`));
           return;
         }
 
         try {
-          const jsonStr = stdout.trim();
+          const jsonStr = stdoutBuffer.trim();
           // Find the last line that looks like JSON, which is our result payload
           const lines = jsonStr.split('\n');
           let parsed: any;
@@ -179,13 +193,19 @@ export class PyannoteWorker implements DiarizationBackend {
           }
           resolve(parsed.segments as DiarizationSegment[]);
         } catch (err: any) {
-          console.error("[local-transcriber] Diarisation output parse failed", { stdout, error: err.message });
+          console.error("[local-transcriber] Diarisation output parse failed", { stdout: stdoutBuffer, error: err.message });
           reject(new Error(`Failed to parse diarisation output: ${err.message}`));
         }
       });
 
       worker.on('error', (err) => {
-        clearInterval(stallCheckInterval);
+        clearInterval(watchdog);
+        console.error('[local-transcriber-diarization] Spawn error', {
+            err,
+            pythonExe: this.pythonExecutable,
+            args,
+            cwd: this.pluginDir,
+        });
         reject(err);
       });
     });
