@@ -6,6 +6,7 @@ from pyannote.audio import Pipeline
 
 def main():
     print("[diarize] Starting diarization", flush=True)
+    sys.stdout.flush()
     parser = argparse.ArgumentParser()
     parser.add_argument("--audio-path", required=True)
     parser.add_argument("--expected-speakers", type=int)
@@ -14,13 +15,15 @@ def main():
     parser.add_argument("--hf-token", default=None)
     args = parser.parse_args()
 
-    print(f"[diarize] Loaded audio: {args.audio_path}", flush=True)
+    print(f"[diarize] Args: audio={args.audio_path}, expected_speakers={args.expected_speakers}", flush=True)
 
     try:
+        print("[diarize] Loading pyannote model...", flush=True)
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
             use_auth_token=args.hf_token if args.hf_token else False
         )
+        print("[diarize] PyAnnote model loaded", flush=True)
 
         kwargs = {}
         if args.expected_speakers is not None:
@@ -48,7 +51,8 @@ def main():
         print(json.dumps({"segments": segments}))
 
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(f"[diarize] Error: {e}", flush=True)
+        print(f"Error: {e}", file=sys.stderr, flush=True)
         sys.exit(1)
 
 if __name__ == "__main__":

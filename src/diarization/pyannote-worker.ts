@@ -103,13 +103,18 @@ export class PyannoteWorker implements DiarizationBackend {
 
       worker.stdout.on('data', (data) => {
         stdout += data.toString();
+        console.log(`[local-transcriber-diarization] STDOUT: ${data.toString().trim()}`);
         lastOutputTime = Date.now();
       });
 
       worker.stderr.on('data', (data) => {
         stderr += data.toString();
-        console.log(`[local-transcriber-diarization] STDERR: ${data.toString().trim()}`);
+        console.warn(`[local-transcriber-diarization] STDERR: ${data.toString().trim()}`);
         lastOutputTime = Date.now();
+      });
+
+      worker.on('exit', (code, signal) => {
+        console.log('[pyannote-worker] Diarization worker exited', { code, signal });
       });
 
       worker.on('close', (code) => {
