@@ -56,11 +56,28 @@ export class PyannoteWorker implements DiarizationBackend {
       }
 
       const startTime = Date.now();
+      console.log('[pyannote-worker] Diarization command', {
+        pythonExe: this.pythonExecutable,
+        args: [this.scriptPath, ...args],
+        cwd: this.pluginDir,
+        audioPath: options.audioPath,
+        expectedSpeakers: options.expectedSpeakers,
+      });
+
       const worker = spawn(this.pythonExecutable, [this.scriptPath, ...args], {
         signal: options.signal,
-        env: { ...process.env },
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: '1',
+          PYTHONIOENCODING: 'utf-8',
+          PYTHONPATH: [
+            this.pluginDir,
+            process.env.PYTHONPATH ?? '',
+          ].filter(Boolean).join(path.delimiter),
+        },
         cwd: this.pluginDir,
-        shell: true,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
 
       console.log("[local-transcriber] Diarisation worker started", { pid: worker.pid });
