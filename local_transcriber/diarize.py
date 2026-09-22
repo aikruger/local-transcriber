@@ -19,9 +19,10 @@ def main():
 
     try:
         print("[diarize] Loading pyannote model...", flush=True)
+        pipeline_kwargs = {"token": args.hf_token} if args.hf_token else {}
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=args.hf_token if args.hf_token else False
+            **pipeline_kwargs
         )
         print("[diarize] PyAnnote model loaded", flush=True)
 
