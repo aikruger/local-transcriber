@@ -54,6 +54,22 @@ import { App, Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
                 	}
                 });
                                                                                                                          
+                this.addCommand({
+                        id: 'transcribe-file-with-diarization',
+                        name: 'Transcribe file with diarization',
+                        callback: async () => {
+                                console.log('[LocalTranscriber] Starting file transcription with diarization...');
+                                try {
+                                        const { FileTranscribeModal } = await import('./ui/file-transcribe-modal');
+                                        const modal = new FileTranscribeModal(this.app, this);
+                                        modal.open();
+                                } catch (e) {
+                                        console.error('[LocalTranscriber] Failed to open file transcribe modal', e);
+                                        new Notice('Failed to start file transcription.');
+                                }
+                        },
+                });
+
                 this.addCommand({                                                                                        
                         id: 'toggle-live-transcription',
                         name: 'Toggle live transcription',                                                               

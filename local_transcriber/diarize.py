@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+import sys
+import json
+import argparse
+import traceback
+from pyannote.audio import Pipeline
+from pyannote.audio.core.io import Audio
+
+def main():
+    print("[diarize] Starting diarization", flush=True)
+    sys.stdout.flush()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--audio-path", required=True)
+    parser.add_argument("--expected-speakers", type=int)
+    parser.add_argument("--min-speakers", type=int)
+    parser.add_argument("--max-speakers", type=int)
+    parser.add_argument("--hf-token", default=None)
+    args = parser.parse_args()
+
+    print(f"[diarize] Args: audio={args.audio_path}, expected_speakers={args.expected_speakers}", flush=True)
+
+    try:
+        print("[diarize] Loading pyannote model...", flush=True)
+        pipeline_kwargs = {"token": args.hf_token} if args.hf_token else {}
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            **pipeline_kwargs
+        )
+        print("[diarize] PyAnnote model loaded", flush=True)
+
+        kwargs = {}
+        if args.expected_speakers is not None:
+            kwargs["num_speakers"] = args.expected_speakers
+        else:
+            if args.min_speakers is not None:
+                kwargs["min_speakers"] = args.min_speakers
+            if args.max_speakers is not None:
+                kwargs["max_speakers"] = args.max_speakers
+
+        print(f"[diarize] Running diarization with kwargs: {kwargs}", flush=True)
+
+        audio = Audio()
+        waveform, sample_rate = audio(args.audio_path)
+
+        diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate}, **kwargs)
+
+        print("[diarize] Diarization complete, formatting segments", flush=True)
+
+        segments = []
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            segments.append({
+                "start": turn.start,
+                "end": turn.end,
+                "speaker": speaker
+            })
+
+        print(json.dumps({"segments": segments}))
+
+    except Exception as e:
+        print(json.dumps({"event": "error", "message": str(e), "error_type": type(e).__name__}, ensure_ascii=False), flush=True)
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        raise
+
+if __name__ == "__main__":
+    main()

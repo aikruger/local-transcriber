@@ -10,9 +10,20 @@ import json
 import argparse
 import tempfile
 import subprocess
+import time
+from typing import Any
+import traceback
 
+def emit(event: str, **payload: Any) -> None:
+    message = {
+        "type": event,
+        "timestamp": time.time(),
+        **payload,
+    }
+    print(json.dumps(message, ensure_ascii=False), flush=True)
 
 def main():
+    emit("worker_started", pid=os.getpid(), python=sys.executable)
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
     parser.add_argument("--model", default="base.en")
@@ -20,6 +31,8 @@ def main():
     parser.add_argument("--speakers", default="0")
     parser.add_argument("--models-dir", default=None)
     args = parser.parse_args()
+
+    emit("request_received", audio_path=args.input, model=args.model)
 
     language = None if args.language == "auto" else args.language
     models_dir = args.models_dir
@@ -32,26 +45,47 @@ def main():
             check=True, capture_output=True
         )
     except subprocess.CalledProcessError as e:
-        print(json.dumps({"error": f"ffmpeg failed: {e.stderr.decode()}"}))
+        emit("error", message=f"ffmpeg failed: {e.stderr.decode()}", error_type="CalledProcessError")
+        print(f"ffmpeg failed: {e.stderr.decode()}", file=sys.stderr, flush=True)
         sys.exit(2)
 
     try:
-        import whisper
-        model = whisper.load_model(args.model, download_root=models_dir)
-        result = model.transcribe(temp_wav, language=language, word_timestamps=True)
-    except Exception as e:
-        print(json.dumps({"error": f"Whisper failed: {str(e)}"}))
-        sys.exit(2)
+        emit("loading_model", model=args.model)
+        from faster_whisper import WhisperModel
+        device = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
+        compute_type = "int8" if device == "cpu" else "float16"
+        model = WhisperModel(args.model, device=device, compute_type=compute_type, download_root=models_dir)
+        emit("model_loaded", model=args.model)
 
-    segments = []
-    for seg in result.get("segments", []):
-        entry = {
-            "start": seg["start"],
-            "end": seg["end"],
-            "text": seg["text"].strip(),
-            "speaker": None
-        }
-        segments.append(entry)
+        emit("starting_transcription", audio_path=temp_wav)
+
+        segments_generator, info = model.transcribe(
+            temp_wav,
+            language=language,
+            word_timestamps=True
+        )
+        emit("transcription_started", detected_language=getattr(info, "language", None))
+
+        result_segments = []
+        for index, segment in enumerate(segments_generator, start=1):
+            result_segments.append({
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text.strip(),
+                "speaker": None
+            })
+
+            if index == 1 or index % 5 == 0:
+                emit(
+                    "transcription_progress",
+                    segment_count=index,
+                    latest_end_seconds=segment.end,
+                )
+    except Exception as exc:
+        emit("error", message=str(exc), error_type=type(exc).__name__)
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        sys.exit(2)
 
     diarization_error = None
     # Optional diarization
@@ -79,7 +113,7 @@ def main():
             for turn, _, speaker in diarization.itertracks(yield_label=True):
                 intervals.append((turn.start, turn.end, speaker))
 
-            for seg in segments:
+            for seg in result_segments:
                 s_start = seg["start"]
                 s_end = seg["end"]
 
@@ -101,17 +135,19 @@ def main():
         except Exception as e:
             diarization_error = str(e)
 
+    emit("transcription_complete", segment_count=len(result_segments))
+
     # Emit meta first
     print(json.dumps({
         "type": "meta",
-        "duration": result["segments"][-1]["end"] if result.get("segments") else 0,
+        "duration": result_segments[-1]["end"] if result_segments else 0,
         "diarizationRequested": args.speakers != "0",
         "diarizationApplied": diarization_error is None and args.speakers != "0",
         "diarizationError": diarization_error
     }), flush=True)
 
     # Emit live preview lines with correct speakers
-    for seg in segments:
+    for seg in result_segments:
         print(json.dumps({
             "type": "segment",
             "start": seg["start"],
@@ -128,10 +164,10 @@ def main():
 
     print(json.dumps({
         "type": "result",
-        "segments": segments,
+        "segments": result_segments,
         "meta": {
-            "duration": result.get("segments", [{}])[-1].get("end", 0) if len(result.get("segments", [])) > 0 else 0,
-            "language": result.get("language", "unknown"),
+            "duration": result_segments[-1].get("end", 0) if len(result_segments) > 0 else 0,
+            "language": getattr(info, "language", "unknown"),
             "model": args.model,
             "diarizationRequested": args.speakers != "0",
             "diarizationApplied": diarization_error is None and args.speakers != "0",
